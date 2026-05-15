@@ -67,7 +67,7 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
             "expires": plan_info.get('expires_at', 'N/A'),
             "used": usage
         },
-        "results": result_map if result_map else "No records found in database"
+        "results": result_map
     }
 
 # --- PRIMARY GATEWAY ---
@@ -87,87 +87,94 @@ async def saas_lookup(
     number: Optional[str] = Query(None),
     query: Optional[str] = Query(None)
 ):
-    """
-    Fixed 422 Error: Used Query(None) to make parameters truly optional 
-    so my custom logic can return a helpful JSON error.
-    """
     start_time = time.time()
     num = (number or query or "").strip()
 
     # 1. Parameter Validation
+    # Allow a special internal key for the website or check if there's no key but it's a valid number
     if not key:
+        # Check if this is an internal website request (optional: verify Referer header)
+        # For now, we will require a key but I'll provide a 'Master Key' logic or allow bypass for testing
         return {"status": "error", "message": "Access Denied: Please provide your 'key' parameter"}
     
     if not num:
         return {"status": "error", "message": "Input Required: Please provide a 10-digit number"}
 
+    # 2. Strict 10-Digit Validation
     if not num.isdigit() or len(num) != 10:
-        return {"status": "error", "message": f"Invalid Data: '{num}' is not a valid 10-digit numeric mobile number"}
+        return {"status": "error", "message": f"Invalid Data: '{num}' is not a 10-digit mobile number"}
 
-    # 2. Database Health
+    # 3. Master Key / System Key Check (Optional: For your own website)
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN" # You can use this for your website
+
     db = get_supabase()
     if not db:
-        return {"status": "error", "message": "ServerDown: Internal database link broken (Check Env Vars)"}
+        return {"status": "error", "message": "ServerDown: Database connection failure"}
 
     try:
-        # 3. Key Authentication
-        auth = db.table("api_keys").select("*").eq("api_key", key).single().execute()
-        if not auth.data:
-            return {"status": "error", "message": "Auth Failed: Invalid API key provided"}
-        
-        license = auth.data
-        
-        # 4. Status Check
-        if license['status'] != 'active':
-            return {"status": "error", "message": "Key Suspended: Your API access is currently disabled"}
+        # 4. Key Authentication (Skip if master key used)
+        if not is_master:
+            auth = db.table("api_keys").select("*").eq("api_key", key).single().execute()
+            if not auth.data:
+                return {"status": "error", "message": "Auth Failed: Invalid API key"}
+            
+            license = auth.data
+            
+            # 5. Status & Expiry Check
+            if license['status'] != 'active':
+                return {"status": "error", "message": "Key Suspended: Access disabled"}
 
-        # 5. Expiry Check
-        try:
-            exp_date = datetime.fromisoformat(license['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
-            if exp_date < datetime.utcnow():
-                return {"status": "error", "message": "Key Expired: Please renew your subscription to continue"}
-        except:
-            pass
+            try:
+                exp_date = datetime.fromisoformat(license['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
+                if exp_date < datetime.utcnow():
+                    return {"status": "error", "message": "Key Expired: Please renew subscription"}
+            except:
+                pass
 
-        # 6. Usage Quota
-        if license['request_limit'] and int(license['requests_used']) >= int(license['request_limit']):
-            return {"status": "error", "message": "Quota Exhausted: Your plan limit has been reached for today"}
+            # 6. Usage Quota
+            if license['request_limit'] and int(license['requests_used']) >= int(license['request_limit']):
+                return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
+        else:
+            # Fake license data for master key
+            license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
 
         # 7. Intelligence Source Fetch
         settings = db.table("api_settings").select("real_api_url").limit(1).single().execute()
         target_template = settings.data['real_api_url'] if settings.data else os.getenv("REAL_LOOKUP_URL")
         
         if not target_template:
-            return {"status": "error", "message": "ServerDown: Backend intelligence URL not set in API Settings"}
+             return {"status": "error", "message": "ServerDown: Backend URL not configured"}
 
-        # 8. Execution with Fail-Safe Timeout
+        # 8. Execution
         final_url = target_template.replace("ENTER_TARGET_HERE", num)
         
         try:
             resp = requests.get(final_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
             if resp.status_code != 200:
-                return {"status": "error", "message": f"ServerDown: Remote source returned status {resp.status_code}"}
+                return {"status": "error", "message": "ServerDown: Data source unresponsive"}
             
             payload = resp.json()
-        except requests.exceptions.Timeout:
-            return {"status": "error", "message": "ServerDown: Remote source timed out (Gateway Timeout)"}
         except:
-            return {"status": "error", "message": "ServerDown: Connectivity issue between node and source"}
+            return {"status": "error", "message": "ServerDown: Gateway connection timeout"}
 
-        # 9. Update Transaction Log
-        new_count = (license.get('requests_used') or 0) + 1
-        db.table("api_keys").update({
-            "requests_used": new_count,
-            "last_used_at": datetime.utcnow().isoformat()
-        }).eq("id", license['id']).execute()
+        # 9. Update Usage (Only for real API keys)
+        if not is_master:
+            new_count = (license.get('requests_used') or 0) + 1
+            db.table("api_keys").update({
+                "requests_used": new_count,
+                "last_used_at": datetime.utcnow().isoformat()
+            }).eq("id", license['id']).execute()
+            usage_display = new_count
+        else:
+            usage_display = 0
 
         # 10. Delivery
-        output = build_output(payload, num, license, new_count)
+        output = build_output(payload, num, license, usage_display)
 
-        # 11. Async Trace (Best-effort logging)
+        # 11. Logging
         try:
             db.table("api_logs").insert({
-                "api_key_id": license['id'],
+                "api_key_id": license.get('id') if not is_master else None,
                 "masked_number": f"{num[:5]}****",
                 "status": output['status'],
                 "response_time_ms": int((time.time() - start_time) * 1000),
