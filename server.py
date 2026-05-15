@@ -6,11 +6,11 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Union
 
 app = FastAPI(title="TraceXData Intelligence Engine")
 
-# CORS Setup
+# CORS Setup - Essential for web access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,37 +19,58 @@ app.add_middleware(
 )
 
 # Initialize Supabase
+# Ensure these environment variables are set in Render!
 supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") # Use service role for backend logic
+supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") 
 supabase: Client = create_client(supabase_url, supabase_key)
 
-# --- HELPER: RESPONSE FILTERING ---
-def clean_response(raw_data: dict, query: str, plan: str, expiry: str, used: int):
-    # Determine the results array from the raw API response
-    results = raw_data.get('results') or raw_data.get('data') or ([raw_data] if raw_data.get('status') == True else [])
+# --- HELPER: RESPONSE FILTERING & NORMALIZATION ---
+def clean_response(raw_data: Union[dict, list], query: str, plan: str, expiry: str, used: int):
+    # 1. Normalize input to a list of results
+    results = []
+    if isinstance(raw_data, list):
+        results = raw_data
+    elif isinstance(raw_data, dict):
+        # Check common keys: 'results', 'data', 'records'
+        results = raw_data.get('results') or raw_data.get('data') or raw_data.get('records')
+        if results is None:
+            # If no obvious list, check if the dict itself looks like a result
+            if any(k in raw_data for k in ['name', 'mobile', 'full_name', 'number']):
+                results = [raw_data]
+            else:
+                # Last resort: find any list in the values
+                for v in raw_data.values():
+                    if isinstance(v, list):
+                        results = v
+                        break
+                if results is None: results = []
     
+    # 2. Map and Sanitize
     data_list = []
-    if isinstance(results, list):
-        for idx, item in enumerate(results, 1):
-            if not isinstance(item, dict): continue
-            
-            # Map fields to TraceX Standards and remove forbidden fields
-            obj = {
-                "result_no": idx,
-                "name": str(item.get('name', item.get('full_name', 'N/A'))).upper(),
-                "mobile": str(item.get('mobile', item.get('number', query))),
-                "alt_mobile": str(item.get('alt_mobile', 'N/A')),
-                "operator": str(item.get('operator', 'N/A')).upper(),
-                "circle": str(item.get('circle', item.get('state', 'N/A'))).upper(),
-                "address": str(item.get('address', 'N/A'))
-            }
-            # Clean duplicate/null values
-            for k, v in obj.items():
-                if not v or v in ['null', 'NA', 'None', 'n-a']: obj[k] = "N/A"
-            
-            data_list.append(obj)
+    items_to_process = results if isinstance(results, list) else [results]
+    
+    for idx, item in enumerate(items_to_process, 1):
+        if not isinstance(item, dict): continue
+        
+        # Standard TraceX Mapping
+        obj = {
+            "result_no": idx,
+            "name": str(item.get('name', item.get('full_name', item.get('owner', 'N/A')))).upper(),
+            "mobile": str(item.get('mobile', item.get('number', item.get('phone', query)))),
+            "alt_mobile": str(item.get('alt_mobile', item.get('alt_number', 'N/A'))),
+            "operator": str(item.get('operator', item.get('carrier', 'N/A'))).upper(),
+            "circle": str(item.get('circle', item.get('state', item.get('region', 'N/A')))).upper(),
+            "address": str(item.get('address', item.get('location', 'N/A')))
+        }
+        
+        # Strip ugly null strings
+        for k, v in obj.items():
+            if not v or str(v).lower() in ['null', 'na', 'none', 'n-a', 'undefined', '']: 
+                obj[k] = "N/A"
+        
+        data_list.append(obj)
 
-    # Calculate Time Left
+    # 3. Calculate Meta-Data
     try:
         expires_dt = datetime.fromisoformat(expiry.replace('Z', '+00:00'))
         delta = expires_dt - datetime.utcnow()
@@ -57,7 +78,7 @@ def clean_response(raw_data: dict, query: str, plan: str, expiry: str, used: int
         mins = max(0, int((delta.total_seconds() % 3600) // 60))
         time_left_str = f"{hours}h {mins}m"
     except:
-        time_left_str = "Expired"
+        time_left_str = "Unknown"
 
     return {
         "status": "success" if data_list else "not_found",
@@ -75,75 +96,110 @@ def clean_response(raw_data: dict, query: str, plan: str, expiry: str, used: int
         "data": data_list
     }
 
-# --- SAAS PUBLIC ENDPOINT ---
+# --- PUBLIC ROUTES ---
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "engine": "TraceXData Intelligence SaaS",
+        "api_docs": "https://tracexnumber.web.app/api-docs"
+    }
+
 @app.get("/api/lookup")
-async def api_gateway(key: str, number: str, request: Request):
+async def api_gateway(key: str = None, number: str = None, request: Request = None):
     start_time = datetime.utcnow()
-    client_ip = request.headers.get('x-forwarded-for', request.client.host)
+    client_ip = request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
 
+    # --- INPUT VALIDATION ---
     if not key or not number:
-        raise HTTPException(status_code=400, detail="Missing API Key or Phone Number")
-
-    # 1. Validate Key
-    res = supabase.table("api_keys").select("*").eq("api_key", key).single().execute()
-    if not res.data:
-        return {"status": "error", "message": "Invalid API key"}
-    
-    api_record = res.data
-    
-    # 2. Expiry Check
-    expiry_dt = datetime.fromisoformat(api_record['expires_at'].replace('Z', '+00:00'))
-    if expiry_dt < datetime.utcnow() or api_record['status'] != 'active':
         return {
             "status": "error", 
-            "message": "API key expired", 
-            "buy_api": "https://tracexnumber.web.app/buy-api"
+            "message": "Missing 'key' or 'number' parameter. Example: /api/lookup?key=TX-XXXXX&number=9876543210"
         }
 
-    # 3. Limit Check
-    if api_record['request_limit'] and api_record['requests_used'] >= api_record['request_limit']:
-        return {"status": "error", "message": "Request limit reached"}
-
-    # 4. Get Hidden Real API URL
-    settings_res = supabase.table("api_settings").select("real_api_url").limit(1).single().execute()
-    real_url_template = settings_res.data['real_api_url'] if settings_res.data else os.getenv("REAL_LOOKUP_URL")
-    
-    if not real_url_template:
-        raise HTTPException(status_code=500, detail="Backend configuration error (Target URL missing)")
-
-    target_url = real_url_template.replace("ENTER_TARGET_HERE", number)
-
-    # 5. Execute Secret Fetch
     try:
-        resp = requests.get(target_url, timeout=12)
-        raw_json = resp.json()
+        # 1. AUTHENTICATION & KEY CHECK
+        res = supabase.table("api_keys").select("*").eq("api_key", key).single().execute()
         
-        # 6. Update Usage
-        new_count = api_record['requests_used'] + 1
-        supabase.table("api_keys").update({
-            "requests_used": new_count,
-            "last_used_at": datetime.utcnow().isoformat()
-        }).eq("id", api_record['id']).execute()
+        if not res.data:
+            return {"status": "error", "message": "Access Denied: Invalid API key"}
+        
+        api_record = res.data
+        
+        # 2. STATUS & EXPIRY CHECK
+        try:
+            expiry_str = api_record['expires_at'].replace('Z', '+00:00')
+            expiry_dt = datetime.fromisoformat(expiry_str)
+        except:
+            expiry_dt = datetime.utcnow() - timedelta(days=1)
 
-        # 7. Filtered Response
-        final_output = clean_response(raw_json, number, api_record['plan_name'], api_record['expires_at'], new_count)
+        if expiry_dt < datetime.utcnow() or api_record['status'] != 'active':
+            return {
+                "status": "error", 
+                "message": "Access Denied: Key expired or account suspended", 
+                "buy_api": "https://tracexnumber.web.app/buy-api"
+            }
 
-        # 8. Log the request (Async)
-        supabase.table("api_logs").insert({
-            "api_key_id": api_record['id'],
-            "masked_number": f"{number[:5]}****",
-            "status": final_output['status'],
-            "response_time_ms": int((datetime.utcnow() - start_time).total_seconds() * 1000),
-            "ip_address": client_ip
-        }).execute()
+        # 3. QUOTA CHECK
+        if api_record['request_limit'] is not None and api_record['requests_used'] >= api_record['request_limit']:
+            return {
+                "status": "error", 
+                "message": f"Quota Exceeded: Your plan limit ({api_record['request_limit']}) has been reached."
+            }
 
-        return final_output
+        # 4. TARGET ENGINE FETCH
+        settings_res = supabase.table("api_settings").select("*").limit(1).single().execute()
+        real_url_template = settings_res.data['real_api_url'] if settings_res.data else os.getenv("REAL_LOOKUP_URL")
+        
+        if not real_url_template:
+            return {"status": "error", "message": "Intelligence engine offline. System configuration missing."}
+
+        target_url = real_url_template.replace("ENTER_TARGET_HERE", number)
+
+        # 5. EXECUTE TARGET REQUEST
+        try:
+            resp = requests.get(target_url, timeout=12, headers={"User-Agent": "TraceX-Engine/2.1"})
+            
+            if resp.status_code != 200:
+                return {"status": "error", "message": "Source Engine Error: Backend timeout or invalid target source."}
+
+            raw_json = resp.json()
+            
+            # 6. USAGE UPDATE (Increment database)
+            new_count = api_record['requests_used'] + 1
+            supabase.table("api_keys").update({
+                "requests_used": new_count,
+                "last_used_at": datetime.utcnow().isoformat()
+            }).eq("id", api_record['id']).execute()
+
+            # 7. RESPONSE REFINEMENT
+            result = clean_response(raw_json, number, api_record['plan_name'], api_record['expires_at'], new_count)
+
+            # 8. AUDIT LOGGING
+            try:
+                supabase.table("api_logs").insert({
+                    "api_key_id": api_record['id'],
+                    "masked_number": f"{number[:5]}****",
+                    "status": result['status'],
+                    "response_time_ms": int((datetime.utcnow() - start_time).total_seconds() * 1000),
+                    "ip_address": str(client_ip),
+                    "endpoint": "/api/lookup"
+                }).execute()
+            except: pass # Don't break if logging fails
+
+            return result
+
+        except requests.exceptions.Timeout:
+            return {"status": "error", "message": "Gateway Timeout: Intelligence source took too long to respond."}
+        except Exception as e:
+            return {"status": "error", "message": f"Engine Fault: {str(e)}"}
 
     except Exception as e:
-        print(f"Gateway Error: {e}")
-        return {"status": "error", "message": "Internal service timeout"}
+        return {"status": "error", "message": f"System Error: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-    
+    # Make sure to set PORT environment variable on Render
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
