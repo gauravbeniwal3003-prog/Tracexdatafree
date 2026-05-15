@@ -36,38 +36,78 @@ def get_supabase() -> Optional[Client]:
 
 # --- THE "TECH VISHAL" STYLE FORMATTER ---
 def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
-    # Normalize results into a list first
+    # Detect items: could be a list or a dict (Result 1, Result 2, etc.)
     items = raw_json.get('results') or raw_json.get('data') or raw_json.get('records')
-    if items is None and raw_json.get('status') is True:
-        items = [raw_json]
     
-    # Map into "Result 1", "Result 2" layout
-    result_map = {}
-    if isinstance(items, list):
-        for i, item in enumerate(items, 1):
-            if not isinstance(item, dict): continue
-            result_map[f"Result {i}"] = {
-                "Full Name": str(item.get('name', item.get('full_name', 'N/A'))).upper(),
-                "Mobile No": str(item.get('mobile', item.get('number', query_num))),
-                "Address": str(item.get('address', 'N/A')),
-                "Operator": str(item.get('operator', item.get('carrier', 'N/A'))).upper(),
-                "Circle": str(item.get('circle', item.get('state', 'N/A'))).upper()
-            }
+    clean_results = {}
+    
+    # CASE 1: Items is a Dictionary (e.g., {"Result 1": {...}})
+    if isinstance(items, dict):
+        for key, val in items.items():
+            if isinstance(val, dict):
+                clean_results[key] = {
+                    "name": str(val.get('name', val.get('full_name', 'N/A'))).upper(),
+                    "father_name": str(val.get('father_name', val.get('fathername', 'N/A'))).upper(),
+                    "mobile": str(val.get('mobile', val.get('number', query_num))),
+                    "alt_mobile": str(val.get('alt_mobile', 'N/A')),
+                    "email": str(val.get('email', 'N/A')),
+                    "aadhar_number": str(val.get('aadhar_number', 'N/A')),
+                    "operator": str(val.get('operator', val.get('carrier', 'N/A'))).upper(),
+                    "state_circle": str(val.get('circle', val.get('state_circle', val.get('state', 'N/A')))).upper(),
+                    "address": str(val.get('address', val.get('location', 'N/A')))
+                }
+    
+    # CASE 2: Items is a List
+    elif isinstance(items, list):
+        for i, val in enumerate(items, 1):
+            if isinstance(val, dict):
+                clean_results[f"Result {i}"] = {
+                    "name": str(val.get('name', val.get('full_name', 'N/A'))).upper(),
+                    "father_name": str(val.get('father_name', val.get('fathername', 'N/A'))).upper(),
+                    "mobile": str(val.get('mobile', val.get('number', query_num))),
+                    "alt_mobile": str(val.get('alt_mobile', 'N/A')),
+                    "email": str(val.get('email', 'N/A')),
+                    "aadhar_number": str(val.get('aadhar_number', 'N/A')),
+                    "operator": str(val.get('operator', val.get('carrier', 'N/A'))).upper(),
+                    "state_circle": str(val.get('circle', val.get('state_circle', val.get('state', 'N/A')))).upper(),
+                    "address": str(val.get('address', val.get('location', 'N/A')))
+                }
+    
+    # CASE 3: Raw response is the data itself
+    elif raw_json.get('status') is True or raw_json.get('name'):
+        clean_results["Result 1"] = {
+            "name": str(raw_json.get('name', 'N/A')).upper(),
+            "father_name": str(raw_json.get('father_name', 'N/A')).upper(),
+            "mobile": str(raw_json.get('mobile', query_num)),
+            "alt_mobile": str(raw_json.get('alt_mobile', 'N/A')),
+            "email": str(raw_json.get('email', 'N/A')),
+            "aadhar_number": str(raw_json.get('aadhar_number', 'N/A')),
+            "operator": str(raw_json.get('operator', 'N/A')).upper(),
+            "state_circle": str(raw_json.get('circle', 'N/A')).upper(),
+            "address": str(raw_json.get('address', 'N/A'))
+        }
 
-    # Format the final unified response
+    # Final Output Structure matching screenshot style
     return {
-        "status": "success" if result_map else "no_data",
+        "status": "success" if clean_results else "no_data",
         "Powered_by": "@gaurav_beniwal_0001",
         "Owner": "@gaurav_beniwal_0001",
         "Buy_API": "https://tracexnumber.web.app/buy-api",
-        "Timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "Timestamp": datetime.utcnow().strftime("%d-%m-%Y %I:%M:%S %p"),
         "API_Info": {
             "query": query_num,
             "plan": plan_info.get('plan_name', 'Basic'),
             "expires": plan_info.get('expires_at', 'N/A'),
-            "used": usage
+            "used": usage,
+            "full_endpoint": f"https://tracexdata-api.onrender.com/api/lookup?key={plan_info.get('api_key')}&query={query_num}"
         },
-        "results": result_map
+        "results": clean_results if clean_results else "No Record Found for this number.",
+        "branding": {
+            "provider": "TraceXData Intelligence PRO",
+            "developer": "@gaurav_beniwal_0001",
+            "website": "https://tracexnumber.web.app",
+            "support": "@gaurav_beniwal_0001"
+        }
     }
 
 # --- PRIMARY GATEWAY ---
