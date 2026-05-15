@@ -4,5 +4,3 @@ supabase
 requests
 python-dotenv
 pydantic
-datetime
-secrets
