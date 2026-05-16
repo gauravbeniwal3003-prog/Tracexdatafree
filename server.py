@@ -34,186 +34,82 @@ def get_supabase() -> Optional[Client]:
                 return None
     return _db
 
-# --- CLEAN PROFESSIONAL FORMATTER ---
+# --- THE "TECH VISHAL" STYLE FORMATTER ---
 def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
-
-    # Detect items from upstream API
-    items = (
-        raw_json.get('results')
-        or raw_json.get('data')
-        or raw_json.get('records')
-    )
-
-    clean_results = []
-
-    # CASE 1: results is dict
+    # Detect items: could be a list or a dict (Result 1, Result 2, etc.)
+    items = raw_json.get('results') or raw_json.get('data') or raw_json.get('records')
+    
+    clean_results = {}
+    
+    # CASE 1: Items is a Dictionary (e.g., {"Result 1": {...}})
     if isinstance(items, dict):
-
-        for _, val in items.items():
-
+        for key, val in items.items():
             if isinstance(val, dict):
-
-                clean_results.append({
-                    "name": str(
-                        val.get('name', val.get('full_name', 'N/A'))
-                    ).upper(),
-
-                    "father_name": str(
-                        val.get('father_name', val.get('fathername', 'N/A'))
-                    ).upper(),
-
-                    "mobile": str(
-                        val.get('mobile', val.get('number', query_num))
-                    ),
-
-                    "alt_mobile": str(
-                        val.get('alt_mobile', 'N/A')
-                    ),
-
-                    "email": str(
-                        val.get('email', 'N/A')
-                    ),
-
-                    "aadhar_number": str(
-                        val.get('aadhar_number', 'N/A')
-                    ),
-
-                    "operator": str(
-                        val.get('operator', val.get('carrier', 'N/A'))
-                    ).upper(),
-
-                    "state_circle": str(
-                        val.get(
-                            'circle',
-                            val.get(
-                                'state_circle',
-                                val.get('state', 'N/A')
-                            )
-                        )
-                    ).upper(),
-
-                    "address": str(
-                        val.get('address', val.get('location', 'N/A'))
-                    )
-                })
-
-    # CASE 2: results is list
+                clean_results[key] = {
+                    "name": str(val.get('name', val.get('full_name', 'N/A'))).upper(),
+                    "father_name": str(val.get('father_name', val.get('fathername', 'N/A'))).upper(),
+                    "mobile": str(val.get('mobile', val.get('number', query_num))),
+                    "alt_mobile": str(val.get('alt_mobile', 'N/A')),
+                    "email": str(val.get('email', 'N/A')),
+                    "aadhar_number": str(val.get('aadhar_number', 'N/A')),
+                    "operator": str(val.get('operator', val.get('carrier', 'N/A'))).upper(),
+                    "state_circle": str(val.get('circle', val.get('state_circle', val.get('state', 'N/A')))).upper(),
+                    "address": str(val.get('address', val.get('location', 'N/A')))
+                }
+    
+    # CASE 2: Items is a List
     elif isinstance(items, list):
-
-        for val in items:
-
+        for i, val in enumerate(items, 1):
             if isinstance(val, dict):
-
-                clean_results.append({
-                    "name": str(
-                        val.get('name', val.get('full_name', 'N/A'))
-                    ).upper(),
-
-                    "father_name": str(
-                        val.get('father_name', val.get('fathername', 'N/A'))
-                    ).upper(),
-
-                    "mobile": str(
-                        val.get('mobile', val.get('number', query_num))
-                    ),
-
-                    "alt_mobile": str(
-                        val.get('alt_mobile', 'N/A')
-                    ),
-
-                    "email": str(
-                        val.get('email', 'N/A')
-                    ),
-
-                    "aadhar_number": str(
-                        val.get('aadhar_number', 'N/A')
-                    ),
-
-                    "operator": str(
-                        val.get('operator', val.get('carrier', 'N/A'))
-                    ).upper(),
-
-                    "state_circle": str(
-                        val.get(
-                            'circle',
-                            val.get(
-                                'state_circle',
-                                val.get('state', 'N/A')
-                            )
-                        )
-                    ).upper(),
-
-                    "address": str(
-                        val.get('address', val.get('location', 'N/A'))
-                    )
-                })
-
-    # CASE 3: raw object itself
+                clean_results[f"Result {i}"] = {
+                    "name": str(val.get('name', val.get('full_name', 'N/A'))).upper(),
+                    "father_name": str(val.get('father_name', val.get('fathername', 'N/A'))).upper(),
+                    "mobile": str(val.get('mobile', val.get('number', query_num))),
+                    "alt_mobile": str(val.get('alt_mobile', 'N/A')),
+                    "email": str(val.get('email', 'N/A')),
+                    "aadhar_number": str(val.get('aadhar_number', 'N/A')),
+                    "operator": str(val.get('operator', val.get('carrier', 'N/A'))).upper(),
+                    "state_circle": str(val.get('circle', val.get('state_circle', val.get('state', 'N/A')))).upper(),
+                    "address": str(val.get('address', val.get('location', 'N/A')))
+                }
+    
+    # CASE 3: Raw response is the data itself
     elif raw_json.get('status') is True or raw_json.get('name'):
+        clean_results["Result 1"] = {
+            "name": str(raw_json.get('name', 'N/A')).upper(),
+            "father_name": str(raw_json.get('father_name', 'N/A')).upper(),
+            "mobile": str(raw_json.get('mobile', query_num)),
+            "alt_mobile": str(raw_json.get('alt_mobile', 'N/A')),
+            "email": str(raw_json.get('email', 'N/A')),
+            "aadhar_number": str(raw_json.get('aadhar_number', 'N/A')),
+            "operator": str(raw_json.get('operator', 'N/A')).upper(),
+            "state_circle": str(raw_json.get('circle', 'N/A')).upper(),
+            "address": str(raw_json.get('address', 'N/A'))
+        }
 
-        clean_results.append({
-            "name": str(
-                raw_json.get('name', 'N/A')
-            ).upper(),
-
-            "father_name": str(
-                raw_json.get('father_name', 'N/A')
-            ).upper(),
-
-            "mobile": str(
-                raw_json.get('mobile', query_num)
-            ),
-
-            "alt_mobile": str(
-                raw_json.get('alt_mobile', 'N/A')
-            ),
-
-            "email": str(
-                raw_json.get('email', 'N/A')
-            ),
-
-            "aadhar_number": str(
-                raw_json.get('aadhar_number', 'N/A')
-            ),
-
-            "operator": str(
-                raw_json.get('operator', 'N/A')
-            ).upper(),
-
-            "state_circle": str(
-                raw_json.get('circle', 'N/A')
-            ).upper(),
-
-            "address": str(
-                raw_json.get('address', 'N/A')
-            )
-        })
-
-    # FINAL CLEAN OUTPUT
+    # Final Output Structure matching screenshot style
     return {
         "status": "success" if clean_results else "no_data",
-
-        "provider": "TraceXData Intelligence PRO",
-
-        "developer": "@gaurav_beniwal_0001",
-
-        "timestamp": datetime.utcnow().strftime(
-            "%d-%m-%Y %I:%M:%S %p"
-        ),
-
-        "api_info": {
+        "Powered_by": "@gaurav_beniwal_0001",
+        "Owner": "@gaurav_beniwal_0001",
+        "Buy_API": "https://tracexnumber.web.app/buy-api",
+        "Timestamp": datetime.utcnow().strftime("%d-%m-%Y %I:%M:%S %p"),
+        "API_Info": {
             "query": query_num,
             "plan": plan_info.get('plan_name', 'Basic'),
             "expires": plan_info.get('expires_at', 'N/A'),
-            "used_requests": usage
+            "used": usage,
+            "full_endpoint": f"https://tracexdata-api.onrender.com/api/lookup?key={plan_info.get('api_key')}&query={query_num}"
         },
-
-        "results_found": len(clean_results),
-
-        "data": clean_results if clean_results else [],
-
-        "support": "https://tracexnumber.web.app/support"
+        "results": clean_results if clean_results else "No Record Found for this number.",
+        "branding": {
+            "provider": "TraceXData Intelligence PRO",
+            "developer": "@gaurav_beniwal_0001",
+            "website": "https://tracexnumber.web.app",
+            "support": "@gaurav_beniwal_0001"
+        }
     }
+
 # --- PRIMARY GATEWAY ---
 
 @app.get("/")
@@ -258,11 +154,11 @@ async def saas_lookup(
     try:
         # 4. Key Authentication (Skip if master key used)
         if not is_master:
-            auth = db.table("api_keys").select("*").eq("api_key", key).single().execute()
-            if not auth.data:
+            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+            if not auth_query.data or len(auth_query.data) == 0:
                 return {"status": "error", "message": "Auth Failed: Invalid API key"}
             
-            license = auth.data
+            license = auth_query.data[0]
             
             # 5. Status & Expiry Check
             if license['status'] != 'active':
@@ -283,8 +179,8 @@ async def saas_lookup(
             license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
 
         # 7. Intelligence Source Fetch
-        settings = db.table("api_settings").select("real_api_url").limit(1).single().execute()
-        target_template = settings.data['real_api_url'] if settings.data else os.getenv("REAL_LOOKUP_URL")
+        settings_query = db.table("api_settings").select("real_api_url").limit(1).execute()
+        target_template = settings_query.data[0]['real_api_url'] if settings_query.data else os.getenv("REAL_LOOKUP_URL")
         
         if not target_template:
              return {"status": "error", "message": "ServerDown: Backend URL not configured"}
