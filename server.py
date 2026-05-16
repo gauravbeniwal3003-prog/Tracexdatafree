@@ -1,8 +1,9 @@
 import os
 import requests
 import time
+import secrets
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from typing import Optional, Dict, Any
@@ -17,6 +18,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Cashfree Configuration
+CASHFREE_APP_ID = os.getenv("CASHFREE_APP_ID")
+CASHFREE_SECRET_KEY = os.getenv("CASHFREE_SECRET_KEY")
+CASHFREE_BASE_URL = os.getenv("CASHFREE_BASE_URL", "https://api.cashfree.com/pg")
 
 # --- ENGINE STATE (Lazy-loading for Render Stability) ---
 _db: Optional[Client] = None
@@ -33,6 +39,185 @@ def get_supabase() -> Optional[Client]:
             except:
                 return None
     return _db
+
+async def fulfill_order(order_id: str, user_id: str):
+    db = get_supabase()
+    if not db:
+        return
+
+    try:
+        # Check if already fulfilled
+        claim_query = db.table("payment_claims").select("*").eq("payment_id", order_id).execute()
+        if not claim_query.data or claim_query.data[0]['status'] == 'success':
+            return
+
+        claim = claim_query.data[0]
+        plan_id = claim['plan_id']
+        user_email = claim.get('user_email', 'N/A')
+
+        # Check if it's an API Plan
+        api_plans = ['a15_500', 'a15_unl', 'a30_1000', 'a30_unl']
+        if plan_id in api_plans:
+            api_key = f"tx_{secrets.token_hex(16)}"
+            days = 15
+            limit = 500
+            plan_name = "15 Days API (500 Req)"
+
+            if plan_id == 'a15_unl':
+                limit = None
+                plan_name = "15 Days Unlimited API"
+            elif plan_id == 'a30_1000':
+                days = 30
+                limit = 1000
+                plan_name = "1 Month API (1000 Req)"
+            elif plan_id == 'a30_unl':
+                days = 30
+                limit = None
+                plan_name = "1 Month Unlimited API"
+
+            expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+            
+            db.table("api_keys").insert({
+                "api_key": api_key,
+                "user_id": user_id,
+                "user_email": user_email,
+                "plan_name": plan_name,
+                "duration_days": days,
+                "request_limit": limit,
+                "expires_at": expires_at,
+                "order_id": order_id
+            }).execute()
+
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            print(f"[FULFILL] Created API Key for {user_id}")
+            return
+
+        # Regular Credit/Unlimited Plans
+        profile_query = db.table("profiles").select("*").eq("id", user_id).execute()
+        if not profile_query.data:
+            return
+        
+        profile = profile_query.data[0]
+        update_data = {}
+
+        # Use more flexible ID checking
+        if plan_id in ['c10', 'credit_10']: update_data['credits'] = (profile.get('credits') or 0) + 10
+        elif plan_id in ['c50', 'credit_50']: update_data['credits'] = (profile.get('credits') or 0) + 50
+        elif plan_id in ['c100', 'credit_100']: update_data['credits'] = (profile.get('credits') or 0) + 100
+        elif plan_id.startswith('u') or plan_id.startswith('unlimited'):
+            # Hours mapping
+            hours_map = {
+                'u1h': 1, 'unlimited_1h': 1,
+                'u1d': 24, 'u24h': 24, 'unlimited_24h': 24, 'unlimited_1d': 24,
+                'u1w': 168, 'unlimited_1w': 168,
+                'u1m': 720, 'unlimited_1m': 720
+            }
+            hours = hours_map.get(plan_id, 0)
+            if not hours and 'h' in plan_id:
+                try: hours = int(plan_id.split('h')[0].replace('u', '').replace('unlimited_', ''))
+                except: hours = 0
+            
+            if hours > 0:
+                now = datetime.utcnow()
+                start = datetime.fromisoformat(profile['unlimited_expiry'].replace('Z', '+00:00')).replace(tzinfo=None) if profile.get('unlimited_expiry') else now
+                if start < now: start = now
+                update_data['unlimited_expiry'] = (start + timedelta(hours=hours)).isoformat()
+
+        if update_data:
+            db.table("profiles").update(update_data).eq("id", user_id).execute()
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            print(f"[FULFILL] Updated profile for {user_id}")
+            
+    except Exception as e:
+        print(f"Fulfillment error: {e}")
+
+@app.post("/api/cashfree/create-order")
+async def create_order(payload: dict = Body(...), request: Request = None):
+    db = get_supabase()
+    if not db:
+        return {"error": "Server connection failure"}
+
+    user_id = payload.get("user_id")
+    plan_id = payload.get("plan_id")
+    amount = payload.get("amount")
+    user_email = payload.get("user_email", "customer@example.com")
+    customer_phone = payload.get("customer_phone", "9999999999")
+    
+    # Default origin fallback
+    origin = "https://tracexnumber.web.app"
+    if request and request.headers.get("origin"):
+        origin = request.headers.get("origin")
+        
+    return_url = payload.get("return_url", f"{origin}?order_id={{order_id}}")
+
+    if not user_id or not plan_id or not amount:
+        return {"error": "Missing required parameters"}
+
+    if not CASHFREE_APP_ID or not CASHFREE_SECRET_KEY:
+        return {"error": "Payment gateway credentials not set"}
+
+    order_id = f"order_{int(time.time())}_{secrets.token_hex(3)}"
+    
+    cf_payload = {
+        "order_id": order_id,
+        "order_amount": float(amount),
+        "order_currency": "INR",
+        "customer_details": {
+            "customer_id": user_id,
+            "customer_email": user_email,
+            "customer_phone": customer_phone
+        },
+        "order_meta": {
+            "return_url": return_url
+        }
+    }
+
+    try:
+        headers = {
+            "x-client-id": CASHFREE_APP_ID,
+            "x-client-secret": CASHFREE_SECRET_KEY,
+            "x-api-version": "2023-08-01",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(f"{CASHFREE_BASE_URL}/orders", json=cf_payload, headers=headers)
+        data = resp.json()
+
+        if resp.status_code != 200:
+            return {"error": data.get("message", "Cashfree error")}
+
+        # Log pending claim
+        db.table("payment_claims").insert({
+            "payment_id": order_id,
+            "user_id": user_id,
+            "plan_id": plan_id,
+            "amount": float(amount),
+            "status": "pending"
+        }).execute()
+
+        return data
+    except Exception as e:
+        return {"error": f"Gateway Exception: {str(e)}"}
+
+@app.get("/api/cashfree/status/{order_id}")
+async def get_status(order_id: str):
+    if not CASHFREE_APP_ID or not CASHFREE_SECRET_KEY:
+        return {"error": "Credentials missing"}
+
+    try:
+        headers = {
+            "x-client-id": CASHFREE_APP_ID,
+            "x-client-secret": CASHFREE_SECRET_KEY,
+            "x-api-version": "2023-08-01"
+        }
+        resp = requests.get(f"{CASHFREE_BASE_URL}/orders/{order_id}", headers=headers)
+        data = resp.json()
+
+        if resp.status_code == 200 and data.get("order_status") == "PAID":
+            await fulfill_order(order_id, data['customer_details']['customer_id'])
+        
+        return data
+    except Exception as e:
+        return {"error": str(e)}
 
 # --- THE "TECH VISHAL" STYLE FORMATTER ---
 def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
@@ -156,31 +341,43 @@ async def saas_lookup(
         if not is_master:
             auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
             if not auth_query.data or len(auth_query.data) == 0:
+                print(f"[AUTH_FAIL] Key: {key}")
                 return {"status": "error", "message": "Auth Failed: Invalid API key"}
             
             license = auth_query.data[0]
             
             # 5. Status & Expiry Check
-            if license['status'] != 'active':
+            if license.get('status') != 'active':
                 return {"status": "error", "message": "Key Suspended: Access disabled"}
 
             try:
-                exp_date = datetime.fromisoformat(license['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
-                if exp_date < datetime.utcnow():
-                    return {"status": "error", "message": "Key Expired: Please renew subscription"}
-            except:
+                if license.get('expires_at'):
+                    exp_date = datetime.fromisoformat(license['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
+                    if exp_date < datetime.utcnow():
+                        return {"status": "error", "message": "Key Expired: Please renew subscription"}
+            except Exception as e:
+                print(f"[EXPIRY_PARSE_ERR] {e}")
                 pass
 
             # 6. Usage Quota
-            if license['request_limit'] and int(license['requests_used']) >= int(license['request_limit']):
+            requests_used = license.get('requests_used') or 0
+            limit = license.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
                 return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
         else:
             # Fake license data for master key
             license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
 
         # 7. Intelligence Source Fetch
-        settings_query = db.table("api_settings").select("real_api_url").limit(1).execute()
-        target_template = settings_query.data[0]['real_api_url'] if settings_query.data else os.getenv("REAL_LOOKUP_URL")
+        target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
+        try:
+            settings_query = db.table("api_settings").select("real_api_url").limit(1).execute()
+            if settings_query.data and len(settings_query.data) > 0:
+                if settings_query.data[0].get('real_api_url'):
+                    target_template = settings_query.data[0]['real_api_url']
+        except Exception as e:
+            print(f"[SETTINGS_ERR] {e}")
+            pass
         
         if not target_template:
              return {"status": "error", "message": "ServerDown: Backend URL not configured"}
