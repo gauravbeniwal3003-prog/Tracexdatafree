@@ -56,24 +56,26 @@ async def fulfill_order(order_id: str, user_id: str):
         user_email = claim.get('user_email', 'N/A')
 
         # Check if it's an API Plan
-        api_plans = ['a15_500', 'a15_unl', 'a30_1000', 'a30_unl']
-        if plan_id in api_plans:
+        is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
+        if is_api_plan:
             api_key = f"tx_{secrets.token_hex(16)}"
             days = 15
             limit = 500
             plan_name = "15 Days API (500 Req)"
 
-            if plan_id == 'a15_unl':
+            if 'unl' in plan_id:
                 limit = None
-                plan_name = "15 Days Unlimited API"
-            elif plan_id == 'a30_1000':
+                plan_name = "15 Days Unlimited API" if '15' in plan_id else "1 Month Unlimited API"
+            
+            if '30' in plan_id:
                 days = 30
+            
+            if '1000' in plan_id:
                 limit = 1000
                 plan_name = "1 Month API (1000 Req)"
-            elif plan_id == 'a30_unl':
-                days = 30
-                limit = None
-                plan_name = "1 Month Unlimited API"
+            elif '500' in plan_id:
+                limit = 500
+                plan_name = "15 Days API (500 Req)"
 
             expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
             
