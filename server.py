@@ -85,22 +85,23 @@ async def fulfill_order(order_id: str, user_id_raw: str):
         protected_number = None
 
         if claim_query.data:
+            # Take the most recent claim if multiple exist
             claim = claim_query.data[0]
             plan_id = claim.get('plan_id')
             payment_source = claim.get('payment_source')
             tg_session_id = claim.get('session_id')
-            tg_user_id = claim.get('telegram_user_id')
+            tg_user_id = str(claim.get('telegram_user_id') or "")
             credits_to_add = claim.get('credits') or 0
             protected_number = claim.get('protected_number')
         
         # Recovery/Fallback for Telegram: Try to find session by order_id in telegram_payment_sessions (old way)
-        if (not tg_session_id or payment_source != 'telegram_bot') and not (tg_user_id):
+        if (not tg_user_id) or (payment_source != 'telegram_bot' and payment_source != 'telegram_bot_stateless'):
             tg_session_query = db.table("telegram_payment_sessions").select("*").eq("cashfree_order_id", order_id).execute()
             if tg_session_query.data:
                 session_data = tg_session_query.data[0]
                 tg_session_id = session_data['session_id']
                 payment_source = 'telegram_bot'
-                tg_user_id = session_data.get('telegram_user_id')
+                tg_user_id = str(session_data.get('telegram_user_id') or "")
                 plan_id = session_data.get('plan_id')
                 credits_to_add = session_data.get('credits') or 0
                 protected_number = session_data.get('protected_number')
@@ -118,7 +119,8 @@ async def fulfill_order(order_id: str, user_id_raw: str):
                         "cashfree_order_id": order_id,
                         "updated_at": datetime.utcnow().isoformat()
                     }).eq("session_id", tg_session_id).execute()
-                except: pass
+                except Exception as e:
+                    print(f"[TG_ERR] Update old session failed: {e}")
 
             # 2. Update Telegram User Account
             user_query = db.table("telegram_users").select("*").eq("telegram_user_id", tg_user_id).execute()
@@ -128,13 +130,7 @@ async def fulfill_order(order_id: str, user_id_raw: str):
                 
                 # Credits mapping fallback from PLAN_CONFIG if not in claim
                 if credits_to_add <= 0 and plan_id in PLAN_CONFIG:
-                   credits_to_add = PLAN_CONFIG[plan_id].get('credits') or 0
-                
-                # Manual legacy mapping
-                if credits_to_add <= 0:
-                    if plan_id in ['c10', 'credit_10']: credits_to_add = 10
-                    elif plan_id in ['c50', 'credit_50']: credits_to_add = 50
-                    elif plan_id in ['c100', 'credit_100']: credits_to_add = 100
+                   credits_to_add = int(PLAN_CONFIG[plan_id].get('credits') or 0)
                 
                 if credits_to_add > 0:
                     tg_update['credits'] = (tg_user.get('credits') or 0) + credits_to_add
@@ -146,25 +142,6 @@ async def fulfill_order(order_id: str, user_id_raw: str):
                    minutes = PLAN_CONFIG[plan_id].get('minutes') or 0
                    if minutes > 0:
                       hours = minutes / 60.0
-
-                # Manual legacy mapping for Unlimited
-                if hours <= 0 and plan_id and (plan_id.startswith('u') or plan_id.startswith('unlimited')):
-                    hours_map = {
-                        'u1h': 1, 'unlimited_1h': 1,
-                        'u1d': 24, 'u24h': 24, 'unlimited_24h': 24, 'unlimited_1d': 24,
-                        'u1w': 168, 'unlimited_1w': 168,
-                        'u1m': 720, 'unlimited_1m': 720
-                    }
-                    hours = hours_map.get(plan_id, 0)
-                    if not hours:
-                       match = re.search(r'(\d+)([hdwm])', plan_id)
-                       if match:
-                           val, unit = match.groups()
-                           val = int(val)
-                           if unit == 'h': hours = val
-                           elif unit == 'd': hours = val * 24
-                           elif unit == 'w': hours = val * 168
-                           elif unit == 'm': hours = val * 720
 
                 if hours > 0:
                     now = datetime.utcnow()
@@ -191,14 +168,17 @@ async def fulfill_order(order_id: str, user_id_raw: str):
                       print(f"[TG_DEBUG] Protected {protected_number} for {tg_user_id}")
 
                 db.table("telegram_users").update(tg_update).eq("telegram_user_id", tg_user_id).execute()
-                print(f"[TG_STATELESS_PAY] tx={tg_session_id}, tg_id={tg_user_id}, plan={plan_id}, order_id={order_id}, status=success, credits_added={credits_to_add}")
+                print(f"[TG_FULFILL_COMPLETE] User {tg_user_id} updated for order {order_id}")
             else:
-                print(f"[TG_WARN] User {tg_user_id} not found in telegram_users table")
+                print(f"[TG_WARN] User {tg_user_id} not found in telegram_users table - Fulfilling claim anyway")
 
-            # Finalize claim record
-            db.table("payment_claims").update({"status": "success", "updated_at": datetime.utcnow().isoformat()}).eq("payment_id", order_id).execute()
-            print(f"[TG_SUCCESS] Fulfilled Order: {order_id}")
-            return
+        # Finalize claim record
+        db.table("payment_claims").update({
+            "status": "success", 
+            "updated_at": datetime.utcnow().isoformat()
+        }).or_(f"payment_id.eq.{order_id},cashfree_order_id.eq.{order_id}").execute()
+        print(f"[TG_SUCCESS] Fulfilled Claim: {order_id}")
+        return
 
         # --- REGULAR WEB FLOW ---
         if not claim_query.data:
@@ -393,6 +373,12 @@ async def create_order(payload: dict = Body(...), request: Request = None):
 
     order_id = f"order_{int(time.time())}_{secrets.token_hex(3)}"
     
+    # Set order metadata
+    order_meta = {"return_url": return_url}
+    # For telegram orders, ALSO hit the bot's webhook to ensure instant notification
+    if payment_source in ["telegram_bot", "telegram_bot_stateless"]:
+        order_meta["notify_url"] = "https://tracexnumber-bot.onrender.com/cashfree/webhook"
+    
     cf_payload = {
         "order_id": order_id,
         "order_amount": float(amount),
@@ -402,9 +388,7 @@ async def create_order(payload: dict = Body(...), request: Request = None):
             "customer_email": user_email,
             "customer_phone": customer_phone
         },
-        "order_meta": {
-            "return_url": return_url
-        }
+        "order_meta": order_meta
     }
 
     try:
@@ -423,11 +407,12 @@ async def create_order(payload: dict = Body(...), request: Request = None):
         # Log pending claim
         claim_data = {
             "payment_id": order_id,
+            "cashfree_order_id": order_id, # Set both for compatibility
             "plan_id": plan_id,
             "amount": float(amount),
             "status": "pending",
             "session_id": payload.get("session_id") or payload.get("tx"),
-            "telegram_user_id": telegram_user_id,
+            "telegram_user_id": str(telegram_user_id) if telegram_user_id else None,
             "telegram_username": payload.get("username"),
             "payment_source": payment_source,
             "credits": payload.get("credits"),
