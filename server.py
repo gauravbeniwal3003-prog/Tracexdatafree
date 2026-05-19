@@ -55,6 +55,68 @@ async def fulfill_order(order_id: str, user_id: str):
         plan_id = claim['plan_id']
         user_email = claim.get('user_email', 'N/A')
 
+        # Check if it's a Telegram Order
+        payment_source = claim.get('payment_source')
+        tg_session_id = claim.get('session_id')
+        tg_user_id = claim.get('telegram_user_id')
+
+        if payment_source == 'telegram_bot' and tg_session_id:
+            # 1. Update Session Status
+            db.table("telegram_payment_sessions").update({
+                "status": "success",
+                "paid_at": datetime.utcnow().isoformat(),
+                "cashfree_order_id": order_id
+            }).eq("session_id", tg_session_id).execute()
+
+            # 2. Get Plan Data from Session (to be safe)
+            session_query = db.table("telegram_payment_sessions").select("*").eq("session_id", tg_session_id).execute()
+            if session_query.data:
+                session_data = session_query.data[0]
+                plan_id = session_data['plan_id']
+                tg_user_id = session_data['telegram_user_id']
+                
+                # 3. Update Telegram User
+                user_query = db.table("telegram_users").select("*").eq("telegram_user_id", tg_user_id).execute()
+                if user_query.data:
+                    tg_user = user_query.data[0]
+                    tg_update = {"updated_at": datetime.utcnow().isoformat()}
+                    
+                    # Credits mapping
+                    if plan_id in ['c10', 'credit_10']: tg_update['credits'] = (tg_user.get('credits') or 0) + 10
+                    elif plan_id in ['c50', 'credit_50']: tg_update['credits'] = (tg_user.get('credits') or 0) + 50
+                    elif plan_id in ['c100', 'credit_100']: tg_update['credits'] = (tg_user.get('credits') or 0) + 100
+                    
+                    # Unlimited mapping
+                    elif plan_id.startswith('u') or plan_id.startswith('unlimited'):
+                        hours_map = {
+                            'u1h': 1, 'unlimited_1h': 1,
+                            'u1d': 24, 'u24h': 24, 'unlimited_24h': 24, 'unlimited_1d': 24,
+                            'u1w': 168, 'unlimited_1w': 168,
+                            'u1m': 720, 'unlimited_1m': 720
+                        }
+                        hours = hours_map.get(plan_id, 0)
+                        if hours > 0:
+                            now = datetime.utcnow()
+                            start = datetime.fromisoformat(tg_user['unlimited_expiry'].replace('Z', '+00:00')).replace(tzinfo=None) if tg_user.get('unlimited_expiry') else now
+                            if start < now: start = now
+                            tg_update['unlimited_expiry'] = (start + timedelta(hours=hours)).isoformat()
+                    
+                    # Protected Number mapping
+                    if plan_id == 'protect_number' or session_data.get('payment_for') == 'protect_number':
+                       protected_num = session_data.get('protected_number')
+                       if protected_num:
+                          db.table("protected_numbers").insert({
+                              "phone_number": protected_num,
+                              "telegram_user_id": tg_user_id,
+                              "description": "Protected via Telegram Bot"
+                          }).execute()
+
+                    db.table("telegram_users").update(tg_update).eq("telegram_user_id", tg_user_id).execute()
+            
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            print(f"[TG_FULFILL] Completed Telegram Payment for {tg_user_id}")
+            return
+
         # Check if it's an API Plan
         is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
         if is_api_plan:
@@ -140,6 +202,7 @@ async def create_order(payload: dict = Body(...), request: Request = None):
         return {"error": "Server connection failure"}
 
     user_id = payload.get("user_id")
+    telegram_user_id = payload.get("telegram_user_id")
     plan_id = payload.get("plan_id")
     amount = payload.get("amount")
     user_email = payload.get("user_email", "customer@example.com")
@@ -152,11 +215,15 @@ async def create_order(payload: dict = Body(...), request: Request = None):
         
     return_url = payload.get("return_url", f"{origin}?order_id={{order_id}}")
 
-    if not user_id or not plan_id or not amount:
-        return {"error": "Missing required parameters"}
+    if not (user_id or telegram_user_id) or not plan_id or not amount:
+        return {"error": "Missing required parameters (user identification)"}
 
     if not CASHFREE_APP_ID or not CASHFREE_SECRET_KEY:
         return {"error": "Payment gateway credentials not set"}
+
+    # Generate external customer ID for Cashfree
+    # Use telegram ID if available, otherwise web user ID
+    cf_customer_id = str(user_id) if user_id else f"tg_{telegram_user_id}"
 
     order_id = f"order_{int(time.time())}_{secrets.token_hex(3)}"
     
@@ -165,7 +232,7 @@ async def create_order(payload: dict = Body(...), request: Request = None):
         "order_amount": float(amount),
         "order_currency": "INR",
         "customer_details": {
-            "customer_id": user_id,
+            "customer_id": cf_customer_id,
             "customer_email": user_email,
             "customer_phone": customer_phone
         },
@@ -188,13 +255,27 @@ async def create_order(payload: dict = Body(...), request: Request = None):
             return {"error": data.get("message", "Cashfree error")}
 
         # Log pending claim
-        db.table("payment_claims").insert({
+        claim_data = {
             "payment_id": order_id,
-            "user_id": user_id,
             "plan_id": plan_id,
             "amount": float(amount),
-            "status": "pending"
-        }).execute()
+            "status": "pending",
+            "session_id": payload.get("session_id"),
+            "telegram_user_id": payload.get("telegram_user_id"),
+            "payment_source": payload.get("payment_source")
+        }
+        
+        # Only assign user_id if it's not a Telegram ID (which follows 'tg_...' prefix)
+        # The database expects UUID for user_id
+        if user_id and not str(user_id).startswith("tg_"):
+            claim_data["user_id"] = user_id
+        
+        try:
+            db.table("payment_claims").insert(claim_data).execute()
+        except Exception as e:
+            print(f"[DB_ERR] Payment claim insert failed: {e}")
+            # We continue because order is already created in Cashfree, 
+            # but we should ideally log this clearly.
 
         return data
     except Exception as e:
@@ -432,4 +513,3 @@ if __name__ == "__main__":
     # Render provides PORT env var, default to 10000 for standard Render deploys
     port = int(os.getenv("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
