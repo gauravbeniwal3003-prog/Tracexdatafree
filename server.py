@@ -1,10 +1,7 @@
-import hmac
-import hashlib
 import os
 import requests
 import time
 import secrets
-import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,21 +24,6 @@ CASHFREE_APP_ID = os.getenv("CASHFREE_APP_ID")
 CASHFREE_SECRET_KEY = os.getenv("CASHFREE_SECRET_KEY")
 CASHFREE_BASE_URL = os.getenv("CASHFREE_BASE_URL", "https://api.cashfree.com/pg")
 
-# Telegram Stateless Secret
-TELEGRAM_PAYMENT_LINK_SECRET = os.getenv("TELEGRAM_PAYMENT_LINK_SECRET")
-
-# Plan Configuration
-PLAN_CONFIG = {
-    "c10": {"amount": 20.0, "credits": 10, "name": "10 Credits"},
-    "c50": {"amount": 70.0, "credits": 50, "name": "50 Credits"},
-    "c100": {"amount": 100.0, "credits": 100, "name": "100 Credits"},
-    "u1h": {"amount": 9.0, "credits": 0, "minutes": 60, "name": "1 Hour Unlimited"},
-    "u1d": {"amount": 29.0, "credits": 0, "minutes": 1440, "name": "24 Hours Unlimited"},
-    "u1w": {"amount": 149.0, "credits": 0, "minutes": 10080, "name": "7 Days Unlimited"},
-    "u1m": {"amount": 399.0, "credits": 0, "minutes": 43200, "name": "30 Days Unlimited"},
-    "protect49": {"amount": 49.0, "credits": 0, "name": "Protect Number"}
-}
-
 # --- ENGINE STATE (Lazy-loading for Render Stability) ---
 _db: Optional[Client] = None
 
@@ -58,146 +40,20 @@ def get_supabase() -> Optional[Client]:
                 return None
     return _db
 
-async def fulfill_order(order_id: str, user_id_raw: str):
+async def fulfill_order(order_id: str, user_id: str):
     db = get_supabase()
     if not db:
-        print(f"[FATAL] No DB connection for fulfillment: {order_id}")
         return
-
-    print(f"[FULFILL_START] order_id: {order_id}, user_id_raw: {user_id_raw}")
 
     try:
-        # Check if already fulfilled via payment_claims
-        # We check both payment_id (Cashfree ID) and session_id (which could be the 'tx' code)
-        claim_query = db.table("payment_claims").select("*").or_(f"payment_id.eq.{order_id},cashfree_order_id.eq.{order_id}").execute()
-        
-        if claim_query.data and any(c['status'] in ['success', 'paid', 'completed'] for c in claim_query.data):
-            print(f"[ALREADY_FULFILLED] Order: {order_id}")
-            return
-
-        # Determine if it's a Telegram Order
-        payment_source = 'web'
-        tg_session_id = None
-        tg_user_id = None
-        plan_id = None
-        credits_to_add = 0
-        minutes_to_add = 0
-        protected_number = None
-
-        if claim_query.data:
-            # Take the most recent claim if multiple exist
-            claim = claim_query.data[0]
-            plan_id = claim.get('plan_id')
-            payment_source = claim.get('payment_source')
-            tg_session_id = claim.get('session_id')
-            tg_user_id = str(claim.get('telegram_user_id') or "")
-            credits_to_add = claim.get('credits') or 0
-            protected_number = claim.get('protected_number')
-        
-        # Recovery/Fallback for Telegram: Try to find session by order_id in telegram_payment_sessions (old way)
-        if (not tg_user_id) or (payment_source != 'telegram_bot' and payment_source != 'telegram_bot_stateless'):
-            tg_session_query = db.table("telegram_payment_sessions").select("*").eq("cashfree_order_id", order_id).execute()
-            if tg_session_query.data:
-                session_data = tg_session_query.data[0]
-                tg_session_id = session_data['session_id']
-                payment_source = 'telegram_bot'
-                tg_user_id = str(session_data.get('telegram_user_id') or "")
-                plan_id = session_data.get('plan_id')
-                credits_to_add = session_data.get('credits') or 0
-                protected_number = session_data.get('protected_number')
-                print(f"[TG_RECOVERY] Found old session {tg_session_id} for order {order_id}")
-
-        if (payment_source in ['telegram_bot', 'telegram_bot_stateless']) and tg_user_id:
-            print(f"[TG_DEBUG] Fulfilling Telegram Order: {order_id} | User: {tg_user_id} | Source: {payment_source}")
-            
-            # 1. Update Old Session if exists
-            if tg_session_id:
-                try:
-                    db.table("telegram_payment_sessions").update({
-                        "status": "success",
-                        "paid_at": datetime.utcnow().isoformat(),
-                        "cashfree_order_id": order_id,
-                        "updated_at": datetime.utcnow().isoformat()
-                    }).eq("session_id", tg_session_id).execute()
-                except Exception as e:
-                    print(f"[TG_ERR] Update old session failed: {e}")
-
-            # 2. Update Telegram User Account
-            user_query = db.table("telegram_users").select("*").eq("telegram_user_id", tg_user_id).execute()
-            if user_query.data:
-                tg_user = user_query.data[0]
-                tg_update = {"updated_at": datetime.utcnow().isoformat()}
-                
-                # Credits mapping fallback from PLAN_CONFIG if not in claim
-                if credits_to_add <= 0 and plan_id in PLAN_CONFIG:
-                   credits_to_add = int(PLAN_CONFIG[plan_id].get('credits') or 0)
-                
-                if credits_to_add > 0:
-                    tg_update['credits'] = (tg_user.get('credits') or 0) + credits_to_add
-                    print(f"[TG_DEBUG] +{credits_to_add} Credits for {tg_user_id}")
-                
-                # Unlimited mapping from PLAN_CONFIG
-                hours = 0
-                if plan_id in PLAN_CONFIG:
-                   minutes = PLAN_CONFIG[plan_id].get('minutes') or 0
-                   if minutes > 0:
-                      hours = minutes / 60.0
-
-                if hours > 0:
-                    now = datetime.utcnow()
-                    start_str = tg_user.get('unlimited_expiry')
-                    start = now
-                    if start_str:
-                        try:
-                            start = datetime.fromisoformat(start_str.replace('Z', '+00:00')).replace(tzinfo=None)
-                        except: pass
-                    
-                    if start < now: start = now
-                    tg_update['unlimited_expiry'] = (start + timedelta(hours=hours)).isoformat()
-                    print(f"[TG_DEBUG] +{hours}h Unlimited for {tg_user_id}")
-                
-                # Protected Number mapping
-                if plan_id == 'protect_number' or plan_id == 'protect49':
-                   if protected_number:
-                      db.table("protected_numbers").upsert({
-                          "phone_number": protected_number,
-                          "telegram_user_id": tg_user_id,
-                          "description": "Protected via Telegram Bot",
-                          "updated_at": datetime.utcnow().isoformat()
-                      }, on_conflict="phone_number").execute()
-                      print(f"[TG_DEBUG] Protected {protected_number} for {tg_user_id}")
-
-                db.table("telegram_users").update(tg_update).eq("telegram_user_id", tg_user_id).execute()
-                print(f"[TG_FULFILL_COMPLETE] User {tg_user_id} updated for order {order_id}")
-            else:
-                print(f"[TG_WARN] User {tg_user_id} not found in telegram_users table - Fulfilling claim anyway")
-
-        # Finalize claim record
-        db.table("payment_claims").update({
-            "status": "success", 
-            "updated_at": datetime.utcnow().isoformat()
-        }).or_(f"payment_id.eq.{order_id},cashfree_order_id.eq.{order_id}").execute()
-        print(f"[TG_SUCCESS] Fulfilled Claim: {order_id}")
-        return
-
-        # --- REGULAR WEB FLOW ---
-        if not claim_query.data:
-            print(f"[WEB_WARN] No claim record found for {order_id}")
+        # Check if already fulfilled
+        claim_query = db.table("payment_claims").select("*").eq("payment_id", order_id).execute()
+        if not claim_query.data or claim_query.data[0]['status'] == 'success':
             return
 
         claim = claim_query.data[0]
         plan_id = claim['plan_id']
-        user_id = claim.get('user_id')
         user_email = claim.get('user_email', 'N/A')
-
-        if not user_id:
-            # Try to extract from user_id_raw (from Cashfree customer_id)
-            if user_id_raw and not user_id_raw.startswith("tg_"):
-                user_id = user_id_raw
-        
-        if not user_id:
-            print(f"[WEB_ERROR] Could not identify User UUID for {order_id}")
-            return
 
         # Check if it's an API Plan
         is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
@@ -238,10 +94,9 @@ async def fulfill_order(order_id: str, user_id_raw: str):
             print(f"[FULFILL] Created API Key for {user_id}")
             return
 
-        # Regular Credit/Unlimited Plans for Web Profiles
+        # Regular Credit/Unlimited Plans
         profile_query = db.table("profiles").select("*").eq("id", user_id).execute()
         if not profile_query.data:
-            print(f"[WEB_ERROR] Profile not found for {user_id}")
             return
         
         profile = profile_query.data[0]
@@ -260,15 +115,13 @@ async def fulfill_order(order_id: str, user_id_raw: str):
                 'u1m': 720, 'unlimited_1m': 720
             }
             hours = hours_map.get(plan_id, 0)
+            if not hours and 'h' in plan_id:
+                try: hours = int(plan_id.split('h')[0].replace('u', '').replace('unlimited_', ''))
+                except: hours = 0
+            
             if hours > 0:
                 now = datetime.utcnow()
-                start_str = profile.get('unlimited_expiry')
-                start = now
-                if start_str:
-                    try:
-                        start = datetime.fromisoformat(start_str.replace('Z', '+00:00')).replace(tzinfo=None)
-                    except: pass
-                
+                start = datetime.fromisoformat(profile['unlimited_expiry'].replace('Z', '+00:00')).replace(tzinfo=None) if profile.get('unlimited_expiry') else now
                 if start < now: start = now
                 update_data['unlimited_expiry'] = (start + timedelta(hours=hours)).isoformat()
 
@@ -278,7 +131,7 @@ async def fulfill_order(order_id: str, user_id_raw: str):
             print(f"[FULFILL] Updated profile for {user_id}")
             
     except Exception as e:
-        print(f"CRITICAL Fulfillment error: {e}")
+        print(f"Fulfillment error: {e}")
 
 @app.post("/api/cashfree/create-order")
 async def create_order(payload: dict = Body(...), request: Request = None):
@@ -286,109 +139,39 @@ async def create_order(payload: dict = Body(...), request: Request = None):
     if not db:
         return {"error": "Server connection failure"}
 
-    payment_source = payload.get("payment_source")
-    
-    # --- STATELESS TELEGRAM FLOW ---
-    if payment_source == "telegram_bot_stateless":
-        if not TELEGRAM_PAYMENT_LINK_SECRET:
-            return {"error": "Stateless verification secret missing"}
-        
-        # 1. Verify Signature
-        sig = payload.get("sig")
-        # Extract all params except sig to verify
-        verify_fields = ["source", "tx", "tg_id", "username", "plan", "amount", "credits", "unlimited_minutes", "payment_for", "exp", "protected_number"]
-        params_to_verify = {}
-        for f in verify_fields:
-            if payload.get(f) is not None:
-                params_to_verify[f] = str(payload.get(f))
-        
-        # Sort and sign
-        sorted_keys = sorted(params_to_verify.keys())
-        canonical_str = "&".join([f"{k}={params_to_verify[k]}" for k in sorted_keys])
-        expected_sig = hmac.new(TELEGRAM_PAYMENT_LINK_SECRET.encode(), canonical_str.encode(), hashlib.sha256).hexdigest()[:32]
-        
-        if not hmac.compare_digest(expected_sig, str(sig)):
-            print(f"[TG_VERIFY_FAIL] Expected: {expected_sig}, Got: {sig}")
-            return {"error": "Invalid payment signature"}
-            
-        # 2. Check Expiry
-        try:
-            exp_unix = int(payload.get("exp", 0))
-            if exp_unix < time.time():
-                return {"error": "Payment link has expired"}
-        except:
-            return {"error": "Invalid expiry format"}
-            
-        # 3. Cross-check Plan and Amount (Don't trust amount from payload)
-        plan_id = payload.get("plan")
-        if plan_id not in PLAN_CONFIG:
-            return {"error": f"Invalid plan identifier: {plan_id}"}
-        
-        verified_plan = PLAN_CONFIG[plan_id]
-        verified_amount = verified_plan['amount']
-        verified_credits = verified_plan.get('credits', 0)
-        
-        # Override payload values with verified ones
-        payload['amount'] = verified_amount
-        payload['credits'] = verified_credits
-        payload['plan_id'] = plan_id
-        payload['session_id'] = payload.get("tx")
-        payload['telegram_user_id'] = payload.get("tg_id")
-        
-        print(f"[TG_STATELESS_INIT] tx={payload['session_id']}, tg_id={payload['telegram_user_id']}, plan={plan_id}, amount={verified_amount}")
-
     user_id = payload.get("user_id")
-    telegram_user_id = payload.get("telegram_user_id")
     plan_id = payload.get("plan_id")
     amount = payload.get("amount")
     user_email = payload.get("user_email", "customer@example.com")
     customer_phone = payload.get("customer_phone", "9999999999")
     
-    # Force email if telegram
-    if not user_id and telegram_user_id:
-       user_email = f"{telegram_user_id}@telegram.com"
-
     # Default origin fallback
     origin = "https://tracexnumber.web.app"
     if request and request.headers.get("origin"):
         origin = request.headers.get("origin")
         
-    return_url = payload.get("return_url")
-    if not return_url:
-       if payment_source in ["telegram_bot", "telegram_bot_stateless"]:
-          session_id = payload.get("session_id") or payload.get("tx")
-          return_url = f"{origin}/payment-success?session_id={session_id}&order_id={{order_id}}"
-       else:
-          return_url = f"{origin}?order_id={{order_id}}"
+    return_url = payload.get("return_url", f"{origin}?order_id={{order_id}}")
 
-    if not (user_id or telegram_user_id) or not plan_id or not amount:
-        return {"error": "Missing required parameters (user identification)"}
+    if not user_id or not plan_id or not amount:
+        return {"error": "Missing required parameters"}
 
     if not CASHFREE_APP_ID or not CASHFREE_SECRET_KEY:
         return {"error": "Payment gateway credentials not set"}
 
-    # Generate external customer ID for Cashfree
-    # Use telegram ID if available, otherwise web user ID
-    cf_customer_id = str(user_id) if user_id else f"tg_{telegram_user_id}"
-
     order_id = f"order_{int(time.time())}_{secrets.token_hex(3)}"
-    
-    # Set order metadata
-    order_meta = {"return_url": return_url}
-    # For telegram orders, ALSO hit the bot's webhook to ensure instant notification
-    if payment_source in ["telegram_bot", "telegram_bot_stateless"]:
-        order_meta["notify_url"] = "https://tracexnumber-bot.onrender.com/cashfree/webhook"
     
     cf_payload = {
         "order_id": order_id,
         "order_amount": float(amount),
         "order_currency": "INR",
         "customer_details": {
-            "customer_id": cf_customer_id,
+            "customer_id": user_id,
             "customer_email": user_email,
             "customer_phone": customer_phone
         },
-        "order_meta": order_meta
+        "order_meta": {
+            "return_url": return_url
+        }
     }
 
     try:
@@ -405,28 +188,13 @@ async def create_order(payload: dict = Body(...), request: Request = None):
             return {"error": data.get("message", "Cashfree error")}
 
         # Log pending claim
-        claim_data = {
+        db.table("payment_claims").insert({
             "payment_id": order_id,
-            "cashfree_order_id": order_id, # Set both for compatibility
+            "user_id": user_id,
             "plan_id": plan_id,
             "amount": float(amount),
-            "status": "pending",
-            "session_id": payload.get("session_id") or payload.get("tx"),
-            "telegram_user_id": str(telegram_user_id) if telegram_user_id else None,
-            "telegram_username": payload.get("username"),
-            "payment_source": payment_source,
-            "credits": payload.get("credits"),
-            "protected_number": payload.get("protected_number")
-        }
-        
-        # Only assign user_id if it's not a Telegram ID (which follows 'tg_...' prefix)
-        if user_id and not str(user_id).startswith("tg_"):
-            claim_data["user_id"] = user_id
-        
-        try:
-            db.table("payment_claims").insert(claim_data).execute()
-        except Exception as e:
-            print(f"[DB_ERR] Payment claim insert failed: {e}")
+            "status": "pending"
+        }).execute()
 
         return data
     except Exception as e:
@@ -445,11 +213,8 @@ async def get_status(order_id: str):
         }
         resp = requests.get(f"{CASHFREE_BASE_URL}/orders/{order_id}", headers=headers)
         data = resp.json()
-        
-        status = data.get("order_status")
-        print(f"[STATUS_CHECK] Order: {order_id} | Status: {status}")
 
-        if resp.status_code == 200 and status in ["PAID", "SUCCESS", "COMPLETED"]:
+        if resp.status_code == 200 and data.get("order_status") == "PAID":
             await fulfill_order(order_id, data['customer_details']['customer_id'])
         
         return data
@@ -620,7 +385,12 @@ async def saas_lookup(
              return {"status": "error", "message": "ServerDown: Backend URL not configured"}
 
         # 8. Execution
-        final_url = target_template.replace("ENTER_TARGET_HERE", num)
+        if "ENTER_TARGET_HERE" not in target_template:
+            key_param = os.getenv("LOOKUP_API_KEY") or "TVB_SGL_053B3AA6"
+            service_param = os.getenv("LOOKUP_API_SERVICE") or "number"
+            final_url = f"{target_template.rstrip('/')}?key={key_param}&service={service_param}&number={num}"
+        else:
+            final_url = target_template.replace("ENTER_TARGET_HERE", num)
         
         try:
             resp = requests.get(final_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
