@@ -2,11 +2,21 @@ import os
 import requests
 import time
 import secrets
+import uuid
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from typing import Optional, Dict, Any
+
+def is_valid_uuid(val):
+    if not val:
+        return False
+    try:
+        uuid.UUID(str(val))
+        return True
+    except ValueError:
+        return False
 
 # --- PRODUCTION CONFIGURATION ---
 app = FastAPI(title="TraceXData Intelligence PRO")
@@ -54,6 +64,18 @@ async def fulfill_order(order_id: str, user_id: str):
         claim = claim_query.data[0]
         plan_id = claim['plan_id']
         user_email = claim.get('user_email', 'N/A')
+
+        # Handle manual pgpay guest payments
+        if plan_id == "pgpay_manual":
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            print(f"[SaaS] Manual Guest Payment fulfilled successfully for {order_id}")
+            return
+
+        # Check if user_id is a valid UUID
+        if not is_valid_uuid(user_id):
+            print(f"[FULFILL] Non-UUID user_id '{user_id}' skipped database state updates, marking order {order_id} fulfilled.")
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            return
 
         # Check if it's an API Plan
         is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
@@ -188,9 +210,10 @@ async def create_order(payload: dict = Body(...), request: Request = None):
             return {"error": data.get("message", "Cashfree error")}
 
         # Log pending claim
+        db_user_id = user_id if is_valid_uuid(user_id) else None
         db.table("payment_claims").insert({
             "payment_id": order_id,
-            "user_id": user_id,
+            "user_id": db_user_id,
             "plan_id": plan_id,
             "amount": float(amount),
             "status": "pending"
