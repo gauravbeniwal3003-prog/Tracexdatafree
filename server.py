@@ -41,12 +41,13 @@ def get_supabase() -> Optional[Client]:
     """Ensures server doesn't crash if env vars are missing during cold start."""
     global _db
     if _db is None:
-        url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+        url = os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY")
         if url and key:
             try:
                 _db = create_client(url, key)
-            except:
+            except Exception as e:
+                print(f"[Supabase] Creation failed: {e}")
                 return None
     return _db
 
@@ -143,8 +144,17 @@ async def fulfill_order(order_id: str, user_id: str):
             
             if hours > 0:
                 now = datetime.utcnow()
-                start = datetime.fromisoformat(profile['unlimited_expiry'].replace('Z', '+00:00')).replace(tzinfo=None) if profile.get('unlimited_expiry') else now
-                if start < now: start = now
+                start = now
+                expiry_str = profile.get('unlimited_expiry')
+                if expiry_str:
+                    try:
+                        clean_expiry = expiry_str.replace('Z', '+00:00')
+                        start = datetime.fromisoformat(clean_expiry).replace(tzinfo=None)
+                    except Exception as date_err:
+                        print(f"[FULFILL] Error parsing unlimited_expiry '{expiry_str}': {date_err}")
+                        start = now
+                if start < now:
+                    start = now
                 update_data['unlimited_expiry'] = (start + timedelta(hours=hours)).isoformat()
 
         if update_data:
