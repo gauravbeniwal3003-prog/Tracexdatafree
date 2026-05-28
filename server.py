@@ -515,8 +515,8 @@ async def telegram_lookup(
         # 1. Checking safety protection registry
         is_protected = False
         try:
-            protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", target_telegram_id).maybe_single().execute()
-            if protected_query.data:
+            protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", target_telegram_id).execute()
+            if protected_query and protected_query.data:
                 is_protected = True
         except Exception as e:
             print(f"[PROTECTION_CHECK_ERR] {e}")
@@ -696,8 +696,8 @@ async def vehicle_lookup(
         # 1. Checking safety protection registry
         is_protected = False
         try:
-            protected_query = db.table("protected_vehicles").select("vehicle_number").eq("vehicle_number", target_vehicle_no).maybe_single().execute()
-            if protected_query.data:
+            protected_query = db.table("protected_vehicles").select("vehicle_number").eq("vehicle_number", target_vehicle_no).execute()
+            if protected_query and protected_query.data:
                 is_protected = True
         except Exception as e:
             print(f"[PROTECTION_CHECK_ERR] {e}")
