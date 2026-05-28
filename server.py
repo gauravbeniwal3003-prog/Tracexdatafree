@@ -751,6 +751,18 @@ async def vehicle_lookup(
         if status_val == "success" or status_val == "true" or status_val is True:
             details = data.get("data") or {}
             
+            # Check if details indicates a failure or has no mobile number
+            if details.get("success") is False or details.get("error") == "No data found" or not details.get("mobile") or details.get("mobile") in ["N/A", "0"]:
+                try:
+                    db.table("api_logs").insert({
+                        "api_key_id": license_data.get('id') if not is_master and license_data else None,
+                        "masked_number": f"RC: {target_vehicle_no}",
+                        "status": "failed",
+                        "response_time_ms": int((time.time() - start_time) * 1000)
+                    }).execute()
+                except: pass
+                return {"status": "error", "message": "No Vehicle details available for this registration."}
+
             results = {
                 "Vehicle Match": {
                     "name": details.get("owner_name") or "N/A",
