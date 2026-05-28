@@ -741,7 +741,7 @@ async def vehicle_lookup(
             }
 
         # 2. Call external API
-        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_number&rc={target_vehicle_no}"
+        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_num&rc={target_vehicle_no}"
         resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
         if resp.status_code != 200:
             return {"status": "error", "message": "ServerDown: Data source unresponsive"}
