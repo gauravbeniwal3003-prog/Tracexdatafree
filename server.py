@@ -330,6 +330,12 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
         }
     }
 
+def sanitize_error_message(msg: str) -> str:
+    lowercase_msg = str(msg or "").lower()
+    if any(forbidden in lowercase_msg for forbidden in ["vishal", "tech_vishal", "techvishal", "boss", "telegram", "channel", "access denied", "restricted", "authorized", "engine error"]):
+        return "API error, please try again later."
+    return msg
+
 # --- PRIMARY GATEWAY ---
 
 @app.get("/")
@@ -632,7 +638,7 @@ async def telegram_lookup(
                     "response_time_ms": int((time.time() - start_time) * 1000)
                 }).execute()
             except: pass
-            return {"status": "error", "message": data.get("Message") or "No Telegram details available."}
+            return {"status": "error", "message": sanitize_error_message(data.get("Message") or "No Telegram details available.")}
 
     except Exception as e:
         print(f"Telegram processing error: {e}")
@@ -644,7 +650,7 @@ async def telegram_lookup(
                 "response_time_ms": int((time.time() - start_time) * 1000)
             }).execute()
         except: pass
-        return {"status": "error", "message": "Failed to connect to Telegram intelligence portal."}
+        return {"status": "error", "message": "API error, please try again later."}
 
 @app.get("/api/vehicle")
 async def vehicle_lookup(
@@ -751,10 +757,10 @@ async def vehicle_lookup(
             }
 
         # 2. Call external API
-        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_num&rc={target_vehicle_no}"
+        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_number&rc={target_vehicle_no}"
         resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
         if resp.status_code != 200:
-            return {"status": "error", "message": "ServerDown: Data source unresponsive"}
+            return {"status": "error", "message": "API error, please try again later."}
 
         data = resp.json()
         status_val = data.get("status") or data.get("Status") or False
@@ -817,7 +823,7 @@ async def vehicle_lookup(
                     "response_time_ms": int((time.time() - start_time) * 1000)
                 }).execute()
             except: pass
-            return {"status": "error", "message": data.get("message") or "No Vehicle details available."}
+            return {"status": "error", "message": sanitize_error_message(data.get("message") or "No Vehicle details available.")}
 
     except Exception as e:
         print(f"Vehicle processing error: {e}")
@@ -829,7 +835,7 @@ async def vehicle_lookup(
                 "response_time_ms": int((time.time() - start_time) * 1000)
             }).execute()
         except: pass
-        return {"status": "error", "message": "Failed to connect to Vehicle intelligence portal."}
+        return {"status": "error", "message": "API error, please try again later."}
 
 if __name__ == "__main__":
     import uvicorn
