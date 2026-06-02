@@ -309,7 +309,9 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
 
     # Final Output Structure matching screenshot style
     return {
-        "status": "success" if clean_results else "no_data",
+        "status": True if clean_results else False,
+        "success": True if clean_results else False,
+        "found": True if clean_results else False,
         "Powered_by": "@gaurav_beniwal_0001",
         "Owner": "@gaurav_beniwal_0001",
         "Buy_API": "https://tracexnumber.web.app/buy-api",
@@ -321,7 +323,8 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
             "used": usage,
             "full_endpoint": f"https://tracexdata-api.onrender.com/api/lookup?key={plan_info.get('api_key')}&query={query_num}"
         },
-        "results": clean_results if clean_results else "No Record Found for this number.",
+        "results": list(clean_results.values())[:20] if clean_results else [],
+        "raw": raw_json,
         "branding": {
             "provider": "TraceXData Intelligence PRO",
             "developer": "@gaurav_beniwal_0001",
