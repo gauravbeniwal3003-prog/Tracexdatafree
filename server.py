@@ -431,14 +431,43 @@ async def saas_lookup(
         else:
             final_url = target_template.replace("ENTER_TARGET_HERE", num)
         
-        try:
-            resp = requests.get(final_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
-            if resp.status_code != 200:
-                return {"status": "error", "message": "ServerDown: Data source unresponsive"}
-            
-            payload = resp.json()
-        except:
-            return {"status": "error", "message": "ServerDown: Gateway connection timeout"}
+        max_attempts = 5
+        delays = [1, 2, 3, 4, 5]
+        payload = None
+        last_error_msg = "ServerDown: Data source unresponsive"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+            "Accept": "application/json,text/plain,*/*"
+        }
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(f"[LOOKUP_DIAGNOSTIC] Attempt {attempt} - Fetching compiled URL: {final_url}")
+                resp = requests.get(final_url, timeout=12, headers=headers)
+                print(f"[LOOKUP_DIAGNOSTIC] Attempt {attempt} - Status Code: {resp.status_code}")
+                
+                if resp.status_code != 200:
+                    print(f"[LOOKUP_DIAGNOSTIC] Attempt {attempt} - Bad status content: {resp.text[:400]}")
+                    raise Exception(f"HTTP code {resp.status_code}")
+                
+                body_text = resp.text.strip()
+                if "html" in resp.headers.get("content-type", "").lower() or body_text.startswith("<!DOCTYPE") or body_text.startswith("<html"):
+                    print(f"[LOOKUP_DIAGNOSTIC] Attempt {attempt} - Received HTML instead of JSON")
+                    raise Exception("HTML page blocked / Cloudflare gate challenge")
+                
+                payload = resp.json()
+                break
+            except Exception as lookup_err:
+                print(f"[LOOKUP_DIAGNOSTIC] Attempt {attempt} failed: {lookup_err}")
+                last_error_msg = f"ServerDown: Data source unresponsive ({lookup_err})"
+                if attempt < max_attempts:
+                    sleep_time = delays[attempt - 1]
+                    print(f"[LOOKUP_DIAGNOSTIC] Sleeping {sleep_time}s before next attempt...")
+                    time.sleep(sleep_time)
+
+        if payload is None:
+            return {"status": "error", "message": last_error_msg}
 
         # 9. Update Usage (Only for real API keys)
         if not is_master:
@@ -577,9 +606,16 @@ async def telegram_lookup(
 
         # 2. Call external API
         api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_D500F1C5&service=tg_to_number&telegram={target_telegram_id}"
-        resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
-        if resp.status_code != 200:
-            return {"status": "error", "message": "ServerDown: Data source unresponsive"}
+        try:
+            print(f"[LOOKUP_DIAGNOSTIC] Fetching Telegram URL: {api_url}")
+            resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
+            print(f"[LOOKUP_DIAGNOSTIC] Response from Telegram source: Status Code: {resp.status_code}")
+            if resp.status_code != 200:
+                print(f"[LOOKUP_DIAGNOSTIC] Error Body: {resp.text[:800]}")
+                return {"status": "error", "message": "ServerDown: Data source unresponsive"}
+        except Exception as lookup_err:
+            print(f"[LOOKUP_DIAGNOSTIC] Error fetching Telegram: {lookup_err}")
+            return {"status": "error", "message": "ServerDown: Gateway connection timeout"}
 
         data = resp.json()
         status_val = data.get("Status") or data.get("status") or False
@@ -758,8 +794,15 @@ async def vehicle_lookup(
 
         # 2. Call external API
         api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_number&rc={target_vehicle_no}"
-        resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
-        if resp.status_code != 200:
+        try:
+            print(f"[LOOKUP_DIAGNOSTIC] Fetching Vehicle URL: {api_url}")
+            resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
+            print(f"[LOOKUP_DIAGNOSTIC] Response from Vehicle source: Status Code: {resp.status_code}")
+            if resp.status_code != 200:
+                print(f"[LOOKUP_DIAGNOSTIC] Error Body: {resp.text[:800]}")
+                return {"status": "error", "message": "API error, please try again later."}
+        except Exception as lookup_err:
+            print(f"[LOOKUP_DIAGNOSTIC] Error fetching Vehicle: {lookup_err}")
             return {"status": "error", "message": "API error, please try again later."}
 
         data = resp.json()
