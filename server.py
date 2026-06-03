@@ -274,6 +274,27 @@ async def get_status(order_id: str):
         return {"error": str(e)}
 
 # --- THE "TECH VISHAL" STYLE FORMATTER ---
+def clean_branding_recursive(obj):
+    if isinstance(obj, dict):
+        return {clean_branding_recursive(k): clean_branding_recursive(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_branding_recursive(x) for x in obj]
+    elif isinstance(obj, str):
+        import re
+        forbidden_phrases = [
+            "tech_vishal", "techvishal", "tech vishal", "vishal boss", "vishal_boss", 
+            "techvishalboss", "tech vishal boss", "vishal"
+        ]
+        val = obj
+        for phrase in forbidden_phrases:
+            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            val = pattern.sub("", val)
+        val = re.sub(r'\s+', ' ', val).strip()
+        if not val or val.upper() in ["", "BOSS"]:
+            return "N/A"
+        return val
+    return obj
+
 def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
     # Detect items: could be a list or a dict (Result 1, Result 2, etc.)
     items = raw_json.get('results') or raw_json.get('data') or raw_json.get('records')
@@ -312,10 +333,10 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
                     "address": str(val.get('address', val.get('location', 'N/A')))
                 }
     
-    # CASE 3: Raw response is the data itself
-    elif raw_json.get('status') is True or raw_json.get('name'):
+    # CASE 3: Raw response is the data itself or we can locate data inside raw_json itself
+    elif raw_json.get('status') is True or raw_json.get('name') or raw_json.get('owner_name') or raw_json.get('data') or isinstance(raw_json.get('data'), list):
         clean_results["Result 1"] = {
-            "name": str(raw_json.get('name', 'N/A')).upper(),
+            "name": str(raw_json.get('name', raw_json.get('owner_name', 'N/A'))).upper(),
             "father_name": str(raw_json.get('father_name', 'N/A')).upper(),
             "mobile": str(raw_json.get('mobile', query_num)),
             "alt_mobile": str(raw_json.get('alt_mobile', 'N/A')),
@@ -326,30 +347,22 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
             "address": str(raw_json.get('address', 'N/A'))
         }
 
-    # Final Output Structure matching screenshot style
+    # Clean the brand marks and references (such as Tech Vishal) recursively
+    clean_results = clean_branding_recursive(clean_results)
+
+    # All search results are retained and forwarded without truncation
     return {
-        "status": True if clean_results else False,
+        "status": "success" if clean_results else "failed",
         "success": True if clean_results else False,
-        "found": True if clean_results else False,
-        "Powered_by": "@gaurav_beniwal_0001",
-        "Owner": "@gaurav_beniwal_0001",
-        "Buy_API": "https://tracexnumber.web.app/buy-api",
-        "Timestamp": datetime.utcnow().strftime("%d-%m-%Y %I:%M:%S %p"),
-        "API_Info": {
-            "query": query_num,
-            "plan": plan_info.get('plan_name', 'Basic'),
-            "expires": plan_info.get('expires_at', 'N/A'),
-            "used": usage,
-            "full_endpoint": f"https://tracexdata-api.onrender.com/api/lookup?key={plan_info.get('api_key')}&query={query_num}"
+        "results_found": len(clean_results),
+        "query": query_num,
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %I:%M:%S %p UTC"),
+        "license_info": {
+            "plan_name": plan_info.get('plan_name', 'Basic'),
+            "expires_at": plan_info.get('expires_at', 'N/A'),
+            "requests_used": usage
         },
-        "results": list(clean_results.values())[:20] if clean_results else [],
-        "raw": raw_json,
-        "branding": {
-            "provider": "TraceXData Intelligence PRO",
-            "developer": "@gaurav_beniwal_0001",
-            "website": "https://tracexnumber.web.app",
-            "support": "@gaurav_beniwal_0001"
-        }
+        "results": clean_results
     }
 
 def sanitize_error_message(msg: str) -> str:
@@ -373,10 +386,11 @@ async def saas_lookup(
     request: Request,
     key: Optional[str] = Query(None),
     number: Optional[str] = Query(None),
-    query: Optional[str] = Query(None)
+    query: Optional[str] = Query(None),
+    numquery: Optional[str] = Query(None)
 ):
     start_time = time.time()
-    num = (number or query or "").strip()
+    num = (number or query or numquery or "").strip()
 
     # 1. Parameter Validation
     # Allow a special internal key for the website or check if there's no key but it's a valid number
@@ -546,188 +560,16 @@ async def telegram_lookup(
     telegram: Optional[str] = Query(None),
     query: Optional[str] = Query(None)
 ):
-    start_time = time.time()
-    target_telegram_id = (query or telegram or "").strip()
-    api_key_header = request.headers.get("x-api-key", "")
-    key = (key or api_key_header or "").strip()
+    return {
+        "status": "error",
+        "success": False,
+        "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
+        "buy_url": "https://tracexnumber.web.app/buy-api"
+    }
 
-    if not target_telegram_id:
-        return {"status": "error", "message": "Telegram query parameter is required"}
-
-    db = get_supabase()
-    if not db:
-        return {"status": "error", "message": "Engine Offline: Internal connection failure"}
-
-    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
-    license_data = None
-
-    try:
-        if is_master:
-            license_data = {
-                "id": "master",
-                "plan_name": "Internal Master API",
-                "expires_at": (datetime.utcnow() + timedelta(days=365)).isoformat(),
-                "status": "active",
-                "requests_used": 0,
-                "request_limit": None
-            }
-        else:
-            if not key:
-                return {"status": "error", "message": "API key is required"}
-
-            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
-            if not auth_query.data or len(auth_query.data) == 0:
-                return {"status": "error", "message": "Access Denied: Invalid or unauthorized API key"}
-
-            license_data = auth_query.data[0]
-            if license_data.get('status') != 'active':
-                return {"status": "error", "message": "Subscription Blocked: API key expired or suspended", "buy_url": "https://tracexnumber.web.app/buy-api"}
-
-            try:
-                if license_data.get('expires_at'):
-                    exp_date = datetime.fromisoformat(license_data['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
-                    if exp_date < datetime.utcnow():
-                        return {"status": "error", "message": "Key Expired: Please renew subscription", "buy_url": "https://tracexnumber.web.app/buy-api"}
-            except Exception as e:
-                print(f"[EXPIRY_PARSE_ERR] {e}")
-
-            requests_used = license_data.get('requests_used') or 0
-            limit = license_data.get('request_limit')
-            if limit is not None and int(requests_used) >= int(limit):
-                return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
-
-        # 1. Checking safety protection registry
-        if not check_rate_limit(request):
-            return {"status": "error", "message": "Too many requests. Please slow down."}
-        is_protected = False
-        try:
-            protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", target_telegram_id).execute()
-            if protected_query and protected_query.data:
-                is_protected = True
-        except Exception as e:
-            print(f"[PROTECTION_CHECK_ERR] {e}")
-
-        if is_protected:
-            # Record telemetry for protected search
-            if not is_master and license_data and license_data.get('id'):
-                new_count = (license_data.get('requests_used') or 0) + 1
-                db.table("api_keys").update({
-                    "requests_used": new_count,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", license_data['id']).execute()
-
-            # Log
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master else None,
-                    "masked_number": f"TG: {target_telegram_id}",
-                    "status": "success",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except: pass
-
-            return {
-                "status": "success",
-                "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
-                "results": {
-                    "Telegram Match": {
-                        "name": "PROTECTED RECORD",
-                        "telegram_id": target_telegram_id,
-                        "mobile": "PROTECTED @ TRACEX SHIELD",
-                        "father_name": "PROTECTED @ TRACEX SHIELD",
-                        "alt_mobile": "PROTECTED @ TRACEX SHIELD",
-                        "email": "PROTECTED @ TRACEX SHIELD",
-                        "aadhar_number": "PROTECTED @ TRACEX SHIELD",
-                        "operator": "PROTECTED @ TRACEX SHIELD",
-                        "state_circle": "PROTECTED @ TRACEX SHIELD",
-                        "address": "PROTECTED @ TRACEX SHIELD"
-                    }
-                }
-            }
-
-        # 2. Call external API
-        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_D500F1C5&service=tg_to_number&telegram={target_telegram_id}"
-        try:
-            print(f"[LOOKUP_DIAGNOSTIC] Fetching Telegram URL: {api_url}")
-            resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
-            print(f"[LOOKUP_DIAGNOSTIC] Response from Telegram source: Status Code: {resp.status_code}")
-            if resp.status_code != 200:
-                print(f"[LOOKUP_DIAGNOSTIC] Error Body: {resp.text[:800]}")
-                return {"status": "error", "message": "ServerDown: Data source unresponsive"}
-        except Exception as lookup_err:
-            print(f"[LOOKUP_DIAGNOSTIC] Error fetching Telegram: {lookup_err}")
-            return {"status": "error", "message": "ServerDown: Gateway connection timeout"}
-
-        data = resp.json()
-        status_val = data.get("Status") or data.get("status") or False
-        if status_val is True or status_val == "success" or str(status_val).lower() == "true":
-            mobile_no = "N/A"
-            data_field = data.get("Data") or {}
-            contact_field = data_field.get("Contact") if isinstance(data_field, dict) else None
-            if isinstance(contact_field, list):
-                mobile_no = contact_field[0] if len(contact_field) > 0 else "N/A"
-            elif isinstance(contact_field, str):
-                mobile_no = contact_field
-            elif data.get("Search_Number"):
-                mobile_no = data.get("Search_Number")
-
-            results = {
-                "Telegram Match": {
-                    "name": "Telegram Registered Profile",
-                    "telegram_id": target_telegram_id,
-                    "mobile": mobile_no or "N/A",
-                    "father_name": "N/A",
-                    "alt_mobile": "N/A",
-                    "email": "N/A",
-                    "aadhar_number": "N/A",
-                    "operator": "N/A",
-                    "state_circle": "N/A",
-                    "address": "N/A"
-                }
-            }
-
-            # Record telemetry for successful search
-            if not is_master and license_data and license_data.get('id'):
-                new_count = (license_data.get('requests_used') or 0) + 1
-                db.table("api_keys").update({
-                    "requests_used": new_count,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", license_data['id']).execute()
-
-            # Log API request
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master else None,
-                    "masked_number": f"TG: {target_telegram_id}",
-                    "status": "success",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except Exception as e:
-                print("Failed to log:", e)
-
-            return {"status": "success", "results": results}
-        else:
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master and license_data else None,
-                    "masked_number": f"TG: {target_telegram_id}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except: pass
-            return {"status": "error", "message": sanitize_error_message(data.get("Message") or "No Telegram details available.")}
-
-    except Exception as e:
-        print(f"Telegram processing error: {e}")
-        try:
-            db.table("api_logs").insert({
-                "api_key_id": license_data.get('id') if not is_master and license_data else None,
-                "masked_number": f"TG: {target_telegram_id}",
-                "status": "failed",
-                "response_time_ms": int((time.time() - start_time) * 1000)
-            }).execute()
-        except: pass
-        return {"status": "error", "message": "API error, please try again later."}
+# Disabled block placeholder to maintain structure
+def disabled_telegram_placeholder():
+    pass
 
 @app.get("/api/vehicle")
 async def vehicle_lookup(
@@ -736,192 +578,12 @@ async def vehicle_lookup(
     rc: Optional[str] = Query(None),
     query: Optional[str] = Query(None)
 ):
-    start_time = time.time()
-    target_vehicle_no = (query or rc or "").strip().upper()
-    api_key_header = request.headers.get("x-api-key", "")
-    key = (key or api_key_header or "").strip()
-
-    if not target_vehicle_no:
-        return {"status": "error", "message": "Vehicle RC query parameter is required"}
-
-    db = get_supabase()
-    if not db:
-        return {"status": "error", "message": "Engine Offline: Internal connection failure"}
-
-    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
-    license_data = None
-
-    try:
-        if is_master:
-            license_data = {
-                "id": "master",
-                "plan_name": "Internal Master API",
-                "expires_at": (datetime.utcnow() + timedelta(days=365)).isoformat(),
-                "status": "active",
-                "requests_used": 0,
-                "request_limit": None
-            }
-        else:
-            if not key:
-                return {"status": "error", "message": "API key is required"}
-
-            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
-            if not auth_query.data or len(auth_query.data) == 0:
-                return {"status": "error", "message": "Access Denied: Invalid or unauthorized API key"}
-
-            license_data = auth_query.data[0]
-            if license_data.get('status') != 'active':
-                return {"status": "error", "message": "Subscription Blocked: API key expired or suspended", "buy_url": "https://tracexnumber.web.app/buy-api"}
-
-            try:
-                if license_data.get('expires_at'):
-                    exp_date = datetime.fromisoformat(license_data['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
-                    if exp_date < datetime.utcnow():
-                        return {"status": "error", "message": "Key Expired: Please renew subscription", "buy_url": "https://tracexnumber.web.app/buy-api"}
-            except Exception as e:
-                print(f"[EXPIRY_PARSE_ERR] {e}")
-
-            requests_used = license_data.get('requests_used') or 0
-            limit = license_data.get('request_limit')
-            if limit is not None and int(requests_used) >= int(limit):
-                return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
-
-        # 1. Checking safety protection registry
-        if not check_rate_limit(request):
-            return {"status": "error", "message": "Too many requests. Please slow down."}
-        is_protected = False
-        try:
-            protected_query = db.table("protected_vehicles").select("vehicle_number").eq("vehicle_number", target_vehicle_no).execute()
-            if protected_query and protected_query.data:
-                is_protected = True
-        except Exception as e:
-            print(f"[PROTECTION_CHECK_ERR] {e}")
-
-        if is_protected:
-            # Record telemetry for protected search
-            if not is_master and license_data and license_data.get('id'):
-                new_count = (license_data.get('requests_used') or 0) + 1
-                db.table("api_keys").update({
-                    "requests_used": new_count,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", license_data['id']).execute()
-
-            # Log
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master else None,
-                    "masked_number": f"RC: {target_vehicle_no}",
-                    "status": "success",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except: pass
-
-            return {
-                "status": "success",
-                "message": "Protected: This Vehicle registration holds security clearance. 🛡️",
-                "results": {
-                    "Vehicle Match": {
-                        "name": "PROTECTED RECORD",
-                        "vehicle_no": target_vehicle_no,
-                        "mobile": "PROTECTED @ TRACEX SHIELD",
-                        "father_name": "PROTECTED @ TRACEX SHIELD",
-                        "alt_mobile": "PROTECTED @ TRACEX SHIELD",
-                        "email": "PROTECTED @ TRACEX SHIELD",
-                        "aadhar_number": "PROTECTED @ TRACEX SHIELD",
-                        "operator": "PROTECTED @ TRACEX SHIELD",
-                        "state_circle": "PROTECTED @ TRACEX SHIELD",
-                        "address": "PROTECTED @ TRACEX SHIELD"
-                    }
-                }
-            }
-
-        # 2. Call external API
-        api_url = f"https://techvishalboss.com/api/v1/lookup.php?key=TVB_SGL_0435DADE&service=vehicle_owner_number&rc={target_vehicle_no}"
-        try:
-            print(f"[LOOKUP_DIAGNOSTIC] Fetching Vehicle URL: {api_url}")
-            resp = requests.get(api_url, timeout=12, headers={"User-Agent": "TraceX-SaaS-Node"})
-            print(f"[LOOKUP_DIAGNOSTIC] Response from Vehicle source: Status Code: {resp.status_code}")
-            if resp.status_code != 200:
-                print(f"[LOOKUP_DIAGNOSTIC] Error Body: {resp.text[:800]}")
-                return {"status": "error", "message": "API error, please try again later."}
-        except Exception as lookup_err:
-            print(f"[LOOKUP_DIAGNOSTIC] Error fetching Vehicle: {lookup_err}")
-            return {"status": "error", "message": "API error, please try again later."}
-
-        data = resp.json()
-        status_val = data.get("status") or data.get("Status") or False
-        if status_val == "success" or status_val == "true" or status_val is True:
-            details = data.get("data") or {}
-            
-            # Check if details indicates a failure or has no mobile number
-            if details.get("success") is False or details.get("error") == "No data found" or not details.get("mobile") or details.get("mobile") in ["N/A", "0"]:
-                try:
-                    db.table("api_logs").insert({
-                        "api_key_id": license_data.get('id') if not is_master and license_data else None,
-                        "masked_number": f"RC: {target_vehicle_no}",
-                        "status": "failed",
-                        "response_time_ms": int((time.time() - start_time) * 1000)
-                    }).execute()
-                except: pass
-                return {"status": "error", "message": "No Vehicle details available for this registration."}
-
-            results = {
-                "Vehicle Match": {
-                    "name": details.get("owner_name") or "N/A",
-                    "vehicle_no": details.get("rc_number") or target_vehicle_no,
-                    "mobile": details.get("mobile") or "N/A",
-                    "father_name": details.get("father_name") or "N/A",
-                    "alt_mobile": "N/A",
-                    "email": "N/A",
-                    "aadhar_number": "N/A",
-                    "operator": "N/A",
-                    "state_circle": "N/A",
-                    "address": details.get("present_address") or details.get("permanent_address") or "N/A"
-                }
-            }
-
-            # Record telemetry for successful search
-            if not is_master and license_data and license_data.get('id'):
-                new_count = (license_data.get('requests_used') or 0) + 1
-                db.table("api_keys").update({
-                    "requests_used": new_count,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", license_data['id']).execute()
-
-            # Log API request
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master else None,
-                    "masked_number": f"RC: {target_vehicle_no}",
-                    "status": "success",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except Exception as e:
-                print("Failed to log:", e)
-
-            return {"status": "success", "results": results}
-        else:
-            try:
-                db.table("api_logs").insert({
-                    "api_key_id": license_data.get('id') if not is_master and license_data else None,
-                    "masked_number": f"RC: {target_vehicle_no}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000)
-                }).execute()
-            except: pass
-            return {"status": "error", "message": sanitize_error_message(data.get("message") or "No Vehicle details available.")}
-
-    except Exception as e:
-        print(f"Vehicle processing error: {e}")
-        try:
-            db.table("api_logs").insert({
-                "api_key_id": license_data.get('id') if not is_master and license_data else None,
-                "masked_number": f"RC: {target_vehicle_no}",
-                "status": "failed",
-                "response_time_ms": int((time.time() - start_time) * 1000)
-            }).execute()
-        except: pass
-        return {"status": "error", "message": "API error, please try again later."}
+    return {
+        "status": "error",
+        "success": False,
+        "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
+        "buy_url": "https://tracexnumber.web.app/buy-api"
+    }
 
 if __name__ == "__main__":
     import uvicorn
