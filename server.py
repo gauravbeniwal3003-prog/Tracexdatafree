@@ -436,6 +436,7 @@ async def saas_lookup(
             db.table("search_logs").insert({
                 "user_id": user_id,
                 "user_email": user_email,
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0",
                 "search_query": num
             }).execute()
         except Exception as e:
