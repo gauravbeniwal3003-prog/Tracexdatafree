@@ -411,6 +411,7 @@ async def saas_lookup(
         try:
             db.table("search_logs").insert({
                 "user_id": user_id,
+                "user_email": license.get('user_email'),
                 "search_query": num
             }).execute()
         except Exception as e:
