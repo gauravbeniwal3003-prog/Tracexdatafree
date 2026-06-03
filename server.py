@@ -404,14 +404,17 @@ async def saas_lookup(
                 pass
             
             user_id = license.get('user_id')
+            user_email = license.get('user_email')
         else:
+            license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
             user_id = None
+            user_email = None
 
         # Log the search
         try:
             db.table("search_logs").insert({
                 "user_id": user_id,
-                "user_email": license.get('user_email'),
+                "user_email": user_email,
                 "search_query": num
             }).execute()
         except Exception as e:
@@ -423,8 +426,12 @@ async def saas_lookup(
             if limit is not None and int(requests_used) >= int(limit):
                 return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
         else:
-            # Fake license data for master key
-            license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
+            # Handle non-master key case where license is already set
+            # 6. Usage Quota
+            requests_used = license.get('requests_used') or 0
+            limit = license.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
+                return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
 
         # 7. Intelligence Source Fetch
         target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
