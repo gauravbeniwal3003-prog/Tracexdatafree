@@ -4,10 +4,29 @@ import time
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Query, Body
+from fastapi import FastAPI, Request, Query, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from typing import Optional, Dict, Any
+from collections import defaultdict
+
+# --- RATE LIMITING ---
+ip_records = defaultdict(list)
+RATE_LIMIT = 5 # requests
+RATE_WINDOW = 10 # seconds
+
+def check_rate_limit(request: Request):
+    client_ip = request.headers.get('x-forwarded-for', request.client.host) or "unknown"
+    now = time.time()
+    
+    # Clean up old timestamps
+    ip_records[client_ip] = [ts for ts in ip_records[client_ip] if now - ts < RATE_WINDOW]
+    
+    if len(ip_records[client_ip]) >= RATE_LIMIT:
+        return False
+        
+    ip_records[client_ip].append(now)
+    return True
 
 def is_valid_uuid(val):
     if not val:
@@ -361,6 +380,8 @@ async def saas_lookup(
 
     # 1. Parameter Validation
     # Allow a special internal key for the website or check if there's no key but it's a valid number
+    if not check_rate_limit(request):
+        return {"status": "error", "message": "Too many requests. Please slow down."}
     if not key:
         # Check if this is an internal website request (optional: verify Referer header)
         # For now, we will require a key but I'll provide a 'Master Key' logic or allow bypass for testing
@@ -420,18 +441,11 @@ async def saas_lookup(
         except Exception as e:
             print(f"[LOG_ERR] {e}")
 
-            # 6. Usage Quota
-            requests_used = license.get('requests_used') or 0
-            limit = license.get('request_limit')
-            if limit is not None and int(requests_used) >= int(limit):
-                return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
-        else:
-            # Handle non-master key case where license is already set
-            # 6. Usage Quota
-            requests_used = license.get('requests_used') or 0
-            limit = license.get('request_limit')
-            if limit is not None and int(requests_used) >= int(limit):
-                return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
+        # 6. Usage Quota
+        requests_used = license.get('requests_used') or 0
+        limit = license.get('request_limit')
+        if limit is not None and int(requests_used) >= int(limit):
+            return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
 
         # 7. Intelligence Source Fetch
         target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
@@ -582,6 +596,8 @@ async def telegram_lookup(
                 return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
 
         # 1. Checking safety protection registry
+        if not check_rate_limit(request):
+            return {"status": "error", "message": "Too many requests. Please slow down."}
         is_protected = False
         try:
             protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", target_telegram_id).execute()
@@ -770,6 +786,8 @@ async def vehicle_lookup(
                 return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
 
         # 1. Checking safety protection registry
+        if not check_rate_limit(request):
+            return {"status": "error", "message": "Too many requests. Please slow down."}
         is_protected = False
         try:
             protected_query = db.table("protected_vehicles").select("vehicle_number").eq("vehicle_number", target_vehicle_no).execute()
