@@ -402,6 +402,19 @@ async def saas_lookup(
             except Exception as e:
                 print(f"[EXPIRY_PARSE_ERR] {e}")
                 pass
+            
+            user_id = license.get('user_id')
+        else:
+            user_id = None
+
+        # Log the search
+        try:
+            db.table("search_logs").insert({
+                "user_id": user_id,
+                "search_query": num
+            }).execute()
+        except Exception as e:
+            print(f"[LOG_ERR] {e}")
 
             # 6. Usage Quota
             requests_used = license.get('requests_used') or 0
