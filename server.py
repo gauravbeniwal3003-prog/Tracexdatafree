@@ -476,6 +476,9 @@ async def saas_lookup(
         if not target_template:
              return {"status": "error", "message": "ServerDown: Backend URL not configured"}
 
+        # Force replace any old/stale API keys with the new active key to ensure the new API is used everywhere
+        target_template = target_template.replace("TVB_SGL_053B3AA6", "TVB_SGL_C24439EA")
+
         # 8. Execution
         if "ENTER_TARGET_HERE" not in target_template:
             key_param = os.getenv("LOOKUP_API_KEY") or "TVB_SGL_C24439EA"
