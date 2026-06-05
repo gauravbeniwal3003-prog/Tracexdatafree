@@ -478,7 +478,7 @@ async def saas_lookup(
 
         # 8. Execution
         if "ENTER_TARGET_HERE" not in target_template:
-            key_param = os.getenv("LOOKUP_API_KEY") or "TVB_SGL_053B3AA6"
+            key_param = os.getenv("LOOKUP_API_KEY") or "TVB_SGL_C24439EA"
             service_param = os.getenv("LOOKUP_API_SERVICE") or "number"
             final_url = f"{target_template.rstrip('/')}?key={key_param}&service={service_param}&number={num}"
         else:
