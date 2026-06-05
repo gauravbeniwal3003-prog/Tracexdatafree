@@ -563,12 +563,152 @@ async def telegram_lookup(
     telegram: Optional[str] = Query(None),
     query: Optional[str] = Query(None)
 ):
-    return {
-        "status": "error",
-        "success": False,
-        "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
-        "buy_url": "https://tracexnumber.web.app/buy-api"
-    }
+    targetTelegramId = (query or telegram or "").strip()
+    if not targetTelegramId:
+        return {"status": "error", "message": "Telegram query parameter is required"}
+
+    try:
+        db = get_supabase()
+        if not db:
+            return {"status": "error", "message": "ServerDown: Database connection failure"}
+
+        is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+        keyRecord = None
+
+        if is_master:
+            keyRecord = {
+                "id": "master",
+                "plan_name": "Internal Master API",
+                "status": "active"
+            }
+        else:
+            if not key:
+                return {"status": "error", "message": "API key is required"}
+
+            keyRecords = db.table("api_keys").select("*").eq("api_key", key).execute()
+            if not keyRecords.data or len(keyRecords.data) == 0:
+                return {"status": "error", "message": "Access Denied: Invalid or unauthorized API key"}
+
+            keyRecord = keyRecords.data[0]
+            if keyRecord.get('status') != 'active':
+                return {"status": "error", "message": "Subscription Blocked: API key expired or suspended"}
+
+            # Expiry check
+            try:
+                if keyRecord.get('expires_at'):
+                    from datetime import datetime
+                    exp_date = datetime.fromisoformat(keyRecord['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
+                    if exp_date < datetime.utcnow():
+                        return {"status": "error", "message": "Key Expired: Please renew subscription"}
+            except Exception as e:
+                print(f"[EXP_PARSE_ERR] {e}")
+
+            # Usage check
+            requests_used = keyRecord.get('requests_used') or 0
+            limit = keyRecord.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
+                return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
+
+        # Checking safety protection bypass
+        is_protected = False
+        try:
+            protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", targetTelegramId).execute()
+            if protected_query.data:
+                is_protected = True
+        except Exception as e:
+            print(f"[PROTECT_ERR] {e}")
+
+        if is_protected:
+            # Record telemetry for protected search
+            if not is_master and keyRecord:
+                from datetime import datetime
+                db.table("api_keys").update({
+                    "requests_used": (keyRecord.get('requests_used') or 0) + 1,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", keyRecord['id']).execute()
+
+            return {
+                "status": "success",
+                "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
+                "results": {
+                    "Telegram Match": {
+                        "name": "PROTECTED RECORD",
+                        "telegram_id": targetTelegramId,
+                        "mobile": "PROTECTED @ TRACEX SHIELD",
+                        "father_name": "PROTECTED @ TRACEX SHIELD",
+                        "alt_mobile": "PROTECTED @ TRACEX SHIELD",
+                        "email": "PROTECTED @ TRACEX SHIELD",
+                        "operator": "PROTECTED @ TRACEX SHIELD",
+                        "state_circle": "PROTECTED @ TRACEX SHIELD",
+                        "address": "PROTECTED @ TRACEX SHIELD",
+                        "platform": "Telegram Lookup"
+                    }
+                }
+            }
+
+        target_username = targetTelegramId if targetTelegramId.startswith('@') else f"@{targetTelegramId}"
+        api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+            "Accept": "text/plain,text/html,application/json,*/*"
+        }
+
+        resp = requests.get(api_url, timeout=15, headers=headers)
+        if resp.status_code != 200:
+            return {"status": "error", "message": "api error"}
+
+        text = resp.text or ""
+        cleanedText = text.replace("@Cyb3rS0ldier", "")
+        lowerText = cleanedText.lower()
+
+        if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
+            return {"status": "error", "message": "no result"}
+
+        import re
+        usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
+        idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+        phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+        countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+        codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+
+        username = usernameMatch.group(1).strip() if usernameMatch else target_username
+        telegram_id = idMatch.group(1).strip() if idMatch else "N/A"
+        phone = phoneMatch.group(1).strip() if phoneMatch else "N/A"
+        country = countryMatch.group(1).strip() if countryMatch else "N/A"
+        country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
+
+        if telegram_id == "N/A" and phone == "N/A":
+            return {"status": "error", "message": "no result"}
+
+        results = {
+            "Telegram Match": {
+                "name": username,
+                "telegram_id": telegram_id,
+                "mobile": phone,
+                "father_name": "N/A",
+                "alt_mobile": country_code,
+                "email": "N/A",
+                "operator": country,
+                "state_circle": "N/A",
+                "address": "N/A",
+                "platform": "Telegram Lookup"
+            }
+        }
+
+        # Record telemetry for successful search
+        if not is_master and keyRecord:
+            from datetime import datetime
+            db.table("api_keys").update({
+                "requests_used": (keyRecord.get('requests_used') or 0) + 1,
+                "last_used_at": datetime.utcnow().isoformat()
+            }).eq("id", keyRecord['id']).execute()
+
+        return {"status": "success", "results": results}
+
+    except Exception as err:
+        print(f"Telegram Proxy error: {err}")
+        return {"status": "error", "message": "api error"}
 
 # Disabled block placeholder to maintain structure
 def disabled_telegram_placeholder():
