@@ -97,6 +97,53 @@ async def fulfill_order(order_id: str, user_id: str):
             db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
             return
 
+        # Check if it's a Protection Plan
+        if plan_id.startswith('protect_'):
+            parts = plan_id.split('_', 2)
+            if len(parts) >= 3:
+                protect_type = parts[1]
+                protect_target = parts[2]
+                try:
+                    if protect_type == 'mobile':
+                        exist = db.table("protected_numbers").select("*").eq("phone_number", protect_target).execute()
+                        if not exist.data:
+                            db.table("protected_numbers").insert({
+                                "phone_number": protect_target,
+                                "owner_id": user_id
+                            }).execute()
+                        print(f"[FULFILL] Protected mobile number '{protect_target}' for user {user_id}")
+                    elif protect_type == 'telegram':
+                        clean_un = protect_target.replace('@', '')
+                        exist1 = db.table("protected_telegrams").select("*").eq("telegram_id", clean_un).execute()
+                        if not exist1.data:
+                            db.table("protected_telegrams").insert({
+                                "telegram_id": clean_un,
+                                "owner_id": user_id
+                            }).execute()
+                        
+                        at_un = f"@{clean_un}"
+                        exist2 = db.table("protected_telegrams").select("*").eq("telegram_id", at_un).execute()
+                        if not exist2.data:
+                            db.table("protected_telegrams").insert({
+                                "telegram_id": at_un,
+                                "owner_id": user_id
+                            }).execute()
+                        print(f"[FULFILL] Protected telegram handles '{clean_un}' & '{at_un}' for user {user_id}")
+                    elif protect_type == 'vehicle':
+                        clean_veh = protect_target.upper().strip()
+                        exist = db.table("protected_vehicles").select("*").eq("vehicle_number", clean_veh).execute()
+                        if not exist.data:
+                            db.table("protected_vehicles").insert({
+                                "vehicle_number": clean_veh,
+                                "owner_id": user_id
+                            }).execute()
+                        print(f"[FULFILL] Protected vehicle number '{clean_veh}' for user {user_id}")
+                except Exception as db_err:
+                    print(f"[FULFILL] Error inserting protected item: {db_err}")
+            
+            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+            return
+
         # Check if it's an API Plan
         is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
         if is_api_plan:
@@ -268,6 +315,12 @@ async def get_status(order_id: str):
 
         if resp.status_code == 200 and data.get("order_status") == "PAID":
             await fulfill_order(order_id, data['customer_details']['customer_id'])
+        
+        db = get_supabase()
+        if db:
+            claim_query = db.table("payment_claims").select("plan_id").eq("payment_id", order_id).execute()
+            if claim_query.data:
+                data["plan_id"] = claim_query.data[0]["plan_id"]
         
         return data
     except Exception as e:
