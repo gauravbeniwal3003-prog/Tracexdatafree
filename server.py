@@ -295,6 +295,20 @@ def clean_branding_recursive(obj):
         return val
     return obj
 
+def make_api_response(data: dict) -> dict:
+    branding = {
+        "provider": "TRACEXDATA",
+        "developer": "@gaurav_beniwal_0001",
+        "api_buy_link": "https://tracexnumber.web.app/buy-api",
+        "website_link": "https://tracexnumber.web.app"
+    }
+    # Place directly at the root level of the response dictionary for highest visibility
+    data["developer"] = "@gaurav_beniwal_0001"
+    data["api_buy_link"] = "https://tracexnumber.web.app/buy-api"
+    data["website_link"] = "https://tracexnumber.web.app"
+    data["branding"] = branding
+    return data
+
 def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
     # Detect items: could be a list or a dict (Result 1, Result 2, etc.)
     items = raw_json.get('results') or raw_json.get('data') or raw_json.get('records')
@@ -351,7 +365,7 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
     clean_results = clean_branding_recursive(clean_results)
 
     # All search results are retained and forwarded without truncation
-    return {
+    return make_api_response({
         "status": "success" if clean_results else "failed",
         "success": True if clean_results else False,
         "results_found": len(clean_results),
@@ -363,7 +377,7 @@ def build_output(raw_json: dict, query_num: str, plan_info: dict, usage: int):
             "requests_used": usage
         },
         "results": clean_results
-    }
+    })
 
 def sanitize_error_message(msg: str) -> str:
     lowercase_msg = str(msg or "").lower()
@@ -392,57 +406,45 @@ async def saas_lookup(
     start_time = time.time()
     num = (number or query or numquery or "").strip()
 
-    # 1. Parameter Validation
-    # Allow a special internal key for the website or check if there's no key but it's a valid number
-    if not check_rate_limit(request):
-        return {"status": "error", "message": "Too many requests. Please slow down."}
-    if not key:
-        # Check if this is an internal website request (optional: verify Referer header)
-        # For now, we will require a key but I'll provide a 'Master Key' logic or allow bypass for testing
-        return {"status": "error", "message": "Access Denied: Please provide your 'key' parameter"}
-    
-    if not num:
-        return {"status": "error", "message": "Input Required: Please provide a 10-digit number or Telegram username"}
-
-    # Dynamic detection whether Telegram handle/username or mobile number
-    is_telegram_query = False
-    if any(c.isalpha() for c in num) or num.startswith("@") or "_" in num:
-        is_telegram_query = True
-
-    if is_telegram_query:
-        if len(num) < 3:
-            return {"status": "error", "message": "Invalid Telegram handle: Username must be at least 3 characters long."}
-    else:
-        # Strict 10-Digit Validation
-        if not num.isdigit() or len(num) != 10:
-            return {"status": "error", "message": f"Invalid Data: '{num}' is not a 10-digit mobile number"}
-
-    # 3. Master Key / System Key Check (Optional: For your own website)
-    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN" # You can use this for your website
-
-    db = get_supabase()
-    if not db:
-        return {"status": "error", "message": "ServerDown: Database connection failure"}
-
     try:
-        # 4. Key Authentication (Skip if master key used)
+        # 1. Rate Limiting Check
+        if not check_rate_limit(request):
+            return make_api_response({"status": "error", "message": "Too many requests. Please slow down."})
+
+        # 2. Key Check (Parameter level check)
+        if not key:
+            return make_api_response({"status": "error", "message": "Access Denied: Please provide your 'key' parameter"})
+
+        db = get_supabase()
+        if not db:
+            return make_api_response({"status": "error", "message": "ServerDown: Database connection failure"})
+
+        # Determine if master key is used
+        is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+
+        # 3. Authentication & Plan Validity (Must pass prior to checking target safety status to avoid enumeration attacks)
+        license = None
+        user_id = None
+        user_email = None
+
         if not is_master:
             auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
             if not auth_query.data or len(auth_query.data) == 0:
                 print(f"[AUTH_FAIL] Key: {key}")
-                return {"status": "error", "message": "Auth Failed: Invalid API key"}
+                return make_api_response({"status": "error", "message": "Auth Failed: Invalid API key"})
             
             license = auth_query.data[0]
             
-            # 5. Status & Expiry Check
+            # Status check
             if license.get('status') != 'active':
-                return {"status": "error", "message": "Key Suspended: Access disabled"}
+                return make_api_response({"status": "error", "message": "Key Suspended: Access disabled"})
 
+            # Expiry check
             try:
                 if license.get('expires_at'):
                     exp_date = datetime.fromisoformat(license['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
                     if exp_date < datetime.utcnow():
-                        return {"status": "error", "message": "Key Expired: Please renew subscription"}
+                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
             except Exception as e:
                 print(f"[EXPIRY_PARSE_ERR] {e}")
                 pass
@@ -454,51 +456,85 @@ async def saas_lookup(
             user_id = None
             user_email = None
 
-        # Log the search
-        try:
-            db.table("search_logs").insert({
-                "user_id": user_id,
-                "user_email": user_email,
-                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0",
-                "search_query": num
-            }).execute()
-        except Exception as e:
-            print(f"[LOG_ERR] {e}")
+        # Check presence of input target
+        if not num:
+            return make_api_response({
+                "status": "error",
+                "message": "Input Required: Please provide a 10-digit mobile number or Telegram username. Example: numquery=98797XXXXX or numquery=@gaurav_beniwal_0001"
+            })
 
-        # 6. Usage Quota
-        requests_used = license.get('requests_used') or 0
-        limit = license.get('request_limit')
-        if limit is not None and int(requests_used) >= int(limit):
-            return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
+        # 4. STRICTLY FIRST: DB PROTECTION CHECK
+        # Check if target mobile number or telegram username is registered as protected
+        is_protected_phone = False
+        is_protected_telegram = False
 
-        # 7. Intelligence Source Fetch
-        if is_telegram_query:
-            # Check Telegram Protection
-            is_protected = False
-            tg_clean = num.lstrip('@')
-            tg_at = f"@{tg_clean}"
+        # Check Mobile Protection (only if numeric)
+        if num.isdigit():
             try:
-                protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_clean).execute()
-                if protected_query.data:
-                    is_protected = True
-                else:
-                    protected_query_at = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_at).execute()
-                    if protected_query_at.data:
-                        is_protected = True
-            except Exception as e:
-                print(f"[PROTECT_ERR] {e}")
+                protected_num_query = db.table("protected_numbers").select("phone_number").eq("phone_number", num).execute()
+                if protected_num_query.data:
+                    is_protected_phone = True
+            except Exception as ep:
+                print(f"[MOBILE_PROTECT_ERR] {ep}")
 
-            if is_protected:
-                # Deduct key count / log search telemetry
-                new_count = (license.get('requests_used') or 0) + 1
-                if not is_master:
-                    db.table("api_keys").update({
-                        "requests_used": new_count,
-                        "last_used_at": datetime.utcnow().isoformat()
-                    }).eq("id", license['id']).execute()
-                    
-                return {
+        # Check Telegram Protection (checking clean username and with @ symbol prefix)
+        tg_clean = num.lstrip('@')
+        tg_at = f"@{tg_clean}"
+        try:
+            protected_tg_query1 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_clean).execute()
+            if protected_tg_query1.data:
+                is_protected_telegram = True
+            else:
+                protected_tg_query2 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_at).execute()
+                if protected_tg_query2.data:
+                    is_protected_telegram = True
+        except Exception as et:
+            print(f"[TG_PROTECT_ERR] {et}")
+
+        if is_protected_phone or is_protected_telegram:
+            # Deduct request and update telemetry
+            new_count = (license.get('requests_used') or 0) + 1
+            if not is_master:
+                db.table("api_keys").update({
+                    "requests_used": new_count,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", license['id']).execute()
+
+            try:
+                db.table("api_logs").insert({
+                    "api_key_id": license.get('id') if not is_master else None,
+                    "masked_number": f"PROTECTED:{num[:5]}",
                     "status": "success",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except:
+                pass
+
+            if is_protected_phone:
+                return make_api_response({
+                    "status": "success",
+                    "success": True,
+                    "message": "Protected: This mobile number is protected on TRACEXDATA. 🛡️",
+                    "results": {
+                        "Mobile Match": {
+                            "name": "PROTECTED RECORD",
+                            "mobile": num,
+                            "father_name": "PROTECTED @ TRACEX SHIELD",
+                            "alt_mobile": "PROTECTED @ TRACEX SHIELD",
+                            "email": "PROTECTED @ TRACEX SHIELD",
+                            "operator": "PROTECTED @ TRACEX SHIELD",
+                            "state_circle": "PROTECTED @ TRACEX SHIELD",
+                            "address": "PROTECTED @ TRACEX SHIELD",
+                            "aadhar_number": "PROTECTED @ TRACEX SHIELD",
+                            "platform": "Mobile Protection"
+                        }
+                    }
+                })
+            else:
+                return make_api_response({
+                    "status": "success",
+                    "success": True,
                     "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
                     "results": {
                         "Telegram Match": {
@@ -514,9 +550,49 @@ async def saas_lookup(
                             "platform": "Telegram Lookup"
                         }
                     }
-                }
+                })
 
-            # LIVE API CALL FOR TELEGRAM LOOKUP
+        # 5. INPUT FORMAT COMPLIANCE VALIDATION
+        # Dynamic detection whether the input is a Telegram handle or standard mobile number
+        is_telegram_query = False
+        if any(c.isalpha() for c in num) or num.startswith("@") or "_" in num:
+            is_telegram_query = True
+
+        if is_telegram_query:
+            # Validate Telegram length
+            if len(num) < 3:
+                return make_api_response({
+                    "status": "error",
+                    "message": "Invalid Format: Telegram username/handle must be at least 3 characters long. (e.g. '@gaurav_beniwal_0001')"
+                })
+        else:
+            # Strict 10-Digit Mobile Number Validation
+            if not num.isdigit() or len(num) != 10:
+                return make_api_response({
+                    "status": "error",
+                    "message": f"Invalid Format: '{num}' is not a valid 10-digit mobile number! To do a Mobile Number lookup, please provide an exact 10-digit numeric number. If you wanted to run a Telegram username lookup, please provide a username containing letters, or starting with @ (e.g., '@gaurav_beniwal_0001')."
+                })
+
+        # 6. Log search queries
+        try:
+            db.table("search_logs").insert({
+                "user_id": user_id,
+                "user_email": user_email,
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0",
+                "search_query": num
+            }).execute()
+        except Exception as e:
+            print(f"[LOG_ERR] {e}")
+
+        # 7. Quota limitation checks
+        requests_used = license.get('requests_used') or 0
+        limit = license.get('request_limit')
+        if limit is not None and int(requests_used) >= int(limit):
+            return make_api_response({"status": "error", "message": "Quota Exhausted: Plan limit reached"})
+
+        # 8. Intelligence Source Dispatch
+        if is_telegram_query:
+            # LIVE API CALL FOR TELEGRAM username LOOKUP
             target_username = num if num.startswith('@') else f"@{num}"
             api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
             
@@ -525,76 +601,79 @@ async def saas_lookup(
                 "Accept": "text/plain,text/html,application/json,*/*"
             }
 
-            resp = requests.get(api_url, timeout=15, headers=headers)
-            if resp.status_code != 200:
-                return {"status": "error", "message": "api error"}
-
-            text = resp.text or ""
-            cleanedText = text.replace("@Cyb3rS0ldier", "")
-            lowerText = cleanedText.lower()
-
-            if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
-                return {"status": "error", "message": "no result"}
-
-            import re
-            usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
-            idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
-            phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
-            countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
-            codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
-
-            username = usernameMatch.group(1).strip() if usernameMatch else target_username
-            telegram_id = idMatch.group(1).strip() if idMatch else "N/A"
-            phone = phoneMatch.group(1).strip() if phoneMatch else "N/A"
-            country = countryMatch.group(1).strip() if countryMatch else "N/A"
-            country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
-
-            if telegram_id == "N/A" and phone == "N/A":
-                return {"status": "error", "message": "no result"}
-
-            results = {
-                "Telegram Match": {
-                    "name": username,
-                    "telegram_id": telegram_id,
-                    "mobile": phone,
-                    "father_name": "N/A",
-                    "alt_mobile": country_code,
-                    "email": "N/A",
-                    "operator": country,
-                    "state_circle": "N/A",
-                    "address": "N/A",
-                    "platform": "Telegram Lookup"
-                }
-            }
-
-            new_count = (license.get('requests_used') or 0) + 1
-            if not is_master:
-                db.table("api_keys").update({
-                    "requests_used": new_count,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", license['id']).execute()
-
-            # Format final response
-            output = {
-                "status": "success",
-                "success": True,
-                "results": results,
-                "credits_remaining": (int(limit) - new_count) if (limit is not None and not is_master) else 999999,
-                "requests_used": new_count if not is_master else 0,
-                "execution_time_ms": int((time.time() - start_time) * 1000)
-            }
-
             try:
-                db.table("api_logs").insert({
-                    "api_key_id": license.get('id') if not is_master else None,
-                    "masked_number": f"TG: {num[:12]}",
-                    "status": "success",
-                    "response_time_ms": int((time.time() - start_time) * 1000),
-                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-                }).execute()
-            except: pass
+                resp = requests.get(api_url, timeout=15, headers=headers)
+                if resp.status_code != 200:
+                    return make_api_response({"status": "error", "message": "api error"})
 
-            return output
+                text = resp.text or ""
+                cleanedText = text.replace("@Cyb3rS0ldier", "")
+                lowerText = cleanedText.lower()
+
+                if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
+                    return make_api_response({"status": "error", "message": "no result"})
+
+                import re
+                usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
+                idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+                phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+                countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+                codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+
+                username = usernameMatch.group(1).strip() if usernameMatch else target_username
+                telegram_id = idMatch.group(1).strip() if idMatch else "N/A"
+                phone = phoneMatch.group(1).strip() if phoneMatch else "N/A"
+                country = countryMatch.group(1).strip() if countryMatch else "N/A"
+                country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
+
+                if telegram_id == "N/A" and phone == "N/A":
+                    return make_api_response({"status": "error", "message": "no result"})
+
+                results = {
+                    "Telegram Match": {
+                        "name": username,
+                        "telegram_id": telegram_id,
+                        "mobile": phone,
+                        "father_name": "N/A",
+                        "alt_mobile": country_code,
+                        "email": "N/A",
+                        "operator": country,
+                        "state_circle": "N/A",
+                        "address": "N/A",
+                        "platform": "Telegram Lookup"
+                    }
+                }
+
+                new_count = (license.get('requests_used') or 0) + 1
+                if not is_master:
+                    db.table("api_keys").update({
+                        "requests_used": new_count,
+                        "last_used_at": datetime.utcnow().isoformat()
+                    }).eq("id", license['id']).execute()
+
+                # Format final response
+                output = make_api_response({
+                    "status": "success",
+                    "success": True,
+                    "results": results,
+                    "credits_remaining": (int(limit) - new_count) if (limit is not None and not is_master) else 999999,
+                    "requests_used": new_count if not is_master else 0,
+                    "execution_time_ms": int((time.time() - start_time) * 1000)
+                })
+
+                try:
+                    db.table("api_logs").insert({
+                        "api_key_id": license.get('id') if not is_master else None,
+                        "masked_number": f"TG: {num[:12]}",
+                        "status": "success",
+                        "response_time_ms": int((time.time() - start_time) * 1000),
+                        "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                    }).execute()
+                except: pass
+
+                return output
+            except Exception as e_tg:
+                return make_api_response({"status": "error", "message": f"Telegram API error: {str(e_tg)}"})
 
         target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
         try:
@@ -607,12 +686,12 @@ async def saas_lookup(
             pass
         
         if not target_template:
-             return {"status": "error", "message": "ServerDown: Backend URL not configured"}
+            return make_api_response({"status": "error", "message": "ServerDown: Backend URL not configured"})
 
         # Force replace any old/stale API keys with the new active key to ensure the new API is used everywhere
         target_template = target_template.replace("TVB_SGL_053B3AA6", "TVB_SGL_C24439EA")
 
-        # 8. Execution
+        # Execution
         if "ENTER_TARGET_HERE" not in target_template:
             key_param = os.getenv("LOOKUP_API_KEY") or "TVB_SGL_C24439EA"
             service_param = os.getenv("LOOKUP_API_SERVICE") or "number"
@@ -656,9 +735,9 @@ async def saas_lookup(
                     time.sleep(sleep_time)
 
         if payload is None:
-            return {"status": "error", "message": last_error_msg}
+            return make_api_response({"status": "error", "message": last_error_msg})
 
-        # 9. Update Usage (Only for real API keys)
+        # Update Usage (Only for real API keys)
         if not is_master:
             new_count = (license.get('requests_used') or 0) + 1
             db.table("api_keys").update({
@@ -669,10 +748,10 @@ async def saas_lookup(
         else:
             usage_display = 0
 
-        # 10. Delivery
+        # Delivery
         output = build_output(payload, num, license, usage_display)
 
-        # 11. Logging
+        # Logging
         try:
             db.table("api_logs").insert({
                 "api_key_id": license.get('id') if not is_master else None,
@@ -687,7 +766,7 @@ async def saas_lookup(
 
     except Exception as e:
         print(f"CRITICAL FAULT: {e}")
-        return {"status": "error", "message": "ServerDown: Internal engine mapping error (TX-INTERNAL-FAULT)"}
+        return make_api_response({"status": "error", "message": "ServerDown: Internal engine mapping error (TX-INTERNAL-FAULT)"})
 
 @app.get("/api/telegram")
 async def telegram_lookup(
@@ -698,12 +777,12 @@ async def telegram_lookup(
 ):
     targetTelegramId = (query or telegram or "").strip()
     if not targetTelegramId:
-        return {"status": "error", "message": "Telegram query parameter is required"}
+        return make_api_response({"status": "error", "message": "Telegram query parameter is required"})
 
     try:
         db = get_supabase()
         if not db:
-            return {"status": "error", "message": "ServerDown: Database connection failure"}
+            return make_api_response({"status": "error", "message": "ServerDown: Database connection failure"})
 
         is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
         keyRecord = None
@@ -716,15 +795,15 @@ async def telegram_lookup(
             }
         else:
             if not key:
-                return {"status": "error", "message": "API key is required"}
+                return make_api_response({"status": "error", "message": "API key is required"})
 
             keyRecords = db.table("api_keys").select("*").eq("api_key", key).execute()
             if not keyRecords.data or len(keyRecords.data) == 0:
-                return {"status": "error", "message": "Access Denied: Invalid or unauthorized API key"}
+                return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
 
             keyRecord = keyRecords.data[0]
             if keyRecord.get('status') != 'active':
-                return {"status": "error", "message": "Subscription Blocked: API key expired or suspended"}
+                return make_api_response({"status": "error", "message": "Subscription Blocked: API key expired or suspended"})
 
             # Expiry check
             try:
@@ -732,7 +811,7 @@ async def telegram_lookup(
                     from datetime import datetime
                     exp_date = datetime.fromisoformat(keyRecord['expires_at'].replace('Z', '+00:00')).replace(tzinfo=None)
                     if exp_date < datetime.utcnow():
-                        return {"status": "error", "message": "Key Expired: Please renew subscription"}
+                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
             except Exception as e:
                 print(f"[EXP_PARSE_ERR] {e}")
 
@@ -740,7 +819,7 @@ async def telegram_lookup(
             requests_used = keyRecord.get('requests_used') or 0
             limit = keyRecord.get('request_limit')
             if limit is not None and int(requests_used) >= int(limit):
-                return {"status": "error", "message": "Quota Exhausted: Lookup limit reached"}
+                return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
 
         # Checking safety protection bypass
         is_protected = False
@@ -760,7 +839,7 @@ async def telegram_lookup(
                     "last_used_at": datetime.utcnow().isoformat()
                 }).eq("id", keyRecord['id']).execute()
 
-            return {
+            return make_api_response({
                 "status": "success",
                 "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
                 "results": {
@@ -777,7 +856,7 @@ async def telegram_lookup(
                         "platform": "Telegram Lookup"
                     }
                 }
-            }
+            })
 
         target_username = targetTelegramId if targetTelegramId.startswith('@') else f"@{targetTelegramId}"
         api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
@@ -789,14 +868,14 @@ async def telegram_lookup(
 
         resp = requests.get(api_url, timeout=15, headers=headers)
         if resp.status_code != 200:
-            return {"status": "error", "message": "api error"}
+            return make_api_response({"status": "error", "message": "api error"})
 
         text = resp.text or ""
         cleanedText = text.replace("@Cyb3rS0ldier", "")
         lowerText = cleanedText.lower()
 
         if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
-            return {"status": "error", "message": "no result"}
+            return make_api_response({"status": "error", "message": "no result"})
 
         import re
         usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
@@ -812,7 +891,7 @@ async def telegram_lookup(
         country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
 
         if telegram_id == "N/A" and phone == "N/A":
-            return {"status": "error", "message": "no result"}
+            return make_api_response({"status": "error", "message": "no result"})
 
         results = {
             "Telegram Match": {
@@ -837,11 +916,11 @@ async def telegram_lookup(
                 "last_used_at": datetime.utcnow().isoformat()
             }).eq("id", keyRecord['id']).execute()
 
-        return {"status": "success", "results": results}
+        return make_api_response({"status": "success", "results": results})
 
     except Exception as err:
         print(f"Telegram Proxy error: {err}")
-        return {"status": "error", "message": "api error"}
+        return make_api_response({"status": "error", "message": "api error"})
 
 # Disabled block placeholder to maintain structure
 def disabled_telegram_placeholder():
@@ -854,12 +933,12 @@ async def vehicle_lookup(
     rc: Optional[str] = Query(None),
     query: Optional[str] = Query(None)
 ):
-    return {
+    return make_api_response({
         "status": "error",
         "success": False,
         "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
         "buy_url": "https://tracexnumber.web.app/buy-api"
-    }
+    })
 
 if __name__ == "__main__":
     import uvicorn
