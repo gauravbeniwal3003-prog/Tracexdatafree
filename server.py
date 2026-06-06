@@ -629,6 +629,70 @@ async def saas_lookup(
                 if telegram_id == "N/A" and phone == "N/A":
                     return make_api_response({"status": "error", "message": "no result"})
 
+                # Post-fetch validation to verify protection status (both for Telegram ID and username)
+                post_protected = False
+                if telegram_id != "N/A":
+                    try:
+                        p_query_id = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", telegram_id).execute()
+                        if p_query_id and p_query_id.data:
+                            post_protected = True
+                    except Exception as e_post1:
+                        print(f"[POST_ID_PROTECT_ERR] {e_post1}")
+
+                if not post_protected and username and username != "N/A":
+                    clean_un = username.lstrip('@')
+                    at_un = f"@{clean_un}"
+                    try:
+                        p_query_un1 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", clean_un).execute()
+                        if p_query_un1 and p_query_un1.data:
+                            post_protected = True
+                        else:
+                            p_query_un2 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", at_un).execute()
+                            if p_query_un2 and p_query_un2.data:
+                                post_protected = True
+                    except Exception as e_post2:
+                        print(f"[POST_UN_PROTECT_ERR] {e_post2}")
+
+                if post_protected:
+                    # Deduct telemetry count and return shielded/protected response
+                    new_count = (license.get('requests_used') or 0) + 1
+                    if not is_master:
+                        db.table("api_keys").update({
+                            "requests_used": new_count,
+                            "last_used_at": datetime.utcnow().isoformat()
+                        }).eq("id", license['id']).execute()
+
+                    try:
+                        db.table("api_logs").insert({
+                            "api_key_id": license.get('id') if not is_master else None,
+                            "masked_number": f"PROTECTED:{num[:5]}",
+                            "status": "success",
+                            "response_time_ms": int((time.time() - start_time) * 1000),
+                            "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                        }).execute()
+                    except:
+                        pass
+
+                    return make_api_response({
+                        "status": "success",
+                        "success": True,
+                        "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
+                        "results": {
+                            "Telegram Match": {
+                                "name": "PROTECTED RECORD",
+                                "telegram_id": telegram_id if telegram_id != "N/A" else num,
+                                "mobile": "PROTECTED @ TRACEX SHIELD",
+                                "father_name": "PROTECTED @ TRACEX SHIELD",
+                                "alt_mobile": "PROTECTED @ TRACEX SHIELD",
+                                "email": "PROTECTED @ TRACEX SHIELD",
+                                "operator": "PROTECTED @ TRACEX SHIELD",
+                                "state_circle": "PROTECTED @ TRACEX SHIELD",
+                                "address": "PROTECTED @ TRACEX SHIELD",
+                                "platform": "Telegram Lookup"
+                            }
+                        }
+                    })
+
                 results = {
                     "Telegram Match": {
                         "name": username,
@@ -892,6 +956,58 @@ async def telegram_lookup(
 
         if telegram_id == "N/A" and phone == "N/A":
             return make_api_response({"status": "error", "message": "no result"})
+
+        # Post-fetch validation to verify protection status (both for Telegram ID and username)
+        post_protected = False
+        if telegram_id != "N/A":
+            try:
+                p_query_id = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", telegram_id).execute()
+                if p_query_id and p_query_id.data:
+                    post_protected = True
+            except Exception as e_post1:
+                print(f"[API_POST_ID_PROTECT_ERR] {e_post1}")
+
+        if not post_protected and username and username != "N/A":
+            clean_un = username.lstrip('@')
+            at_un = f"@{clean_un}"
+            try:
+                p_query_un1 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", clean_un).execute()
+                if p_query_un1 and p_query_un1.data:
+                    post_protected = True
+                else:
+                    p_query_un2 = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", at_un).execute()
+                    if p_query_un2 and p_query_un2.data:
+                        post_protected = True
+            except Exception as e_post2:
+                print(f"[API_POST_UN_PROTECT_ERR] {e_post2}")
+
+        if post_protected:
+            # Deduct request and update telemetry since we hit the API and did a lookup
+            if not is_master and keyRecord:
+                from datetime import datetime
+                db.table("api_keys").update({
+                    "requests_used": (keyRecord.get('requests_used') or 0) + 1,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", keyRecord['id']).execute()
+
+            return make_api_response({
+                "status": "success",
+                "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
+                "results": {
+                    "Telegram Match": {
+                        "name": "PROTECTED RECORD",
+                        "telegram_id": telegram_id if telegram_id != "N/A" else targetTelegramId,
+                        "mobile": "PROTECTED @ TRACEX SHIELD",
+                        "father_name": "PROTECTED @ TRACEX SHIELD",
+                        "alt_mobile": "PROTECTED @ TRACEX SHIELD",
+                        "email": "PROTECTED @ TRACEX SHIELD",
+                        "operator": "PROTECTED @ TRACEX SHIELD",
+                        "state_circle": "PROTECTED @ TRACEX SHIELD",
+                        "address": "PROTECTED @ TRACEX SHIELD",
+                        "platform": "Telegram Lookup"
+                    }
+                }
+            })
 
         results = {
             "Telegram Match": {
