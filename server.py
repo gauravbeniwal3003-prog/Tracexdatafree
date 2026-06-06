@@ -402,11 +402,20 @@ async def saas_lookup(
         return {"status": "error", "message": "Access Denied: Please provide your 'key' parameter"}
     
     if not num:
-        return {"status": "error", "message": "Input Required: Please provide a 10-digit number"}
+        return {"status": "error", "message": "Input Required: Please provide a 10-digit number or Telegram username"}
 
-    # 2. Strict 10-Digit Validation
-    if not num.isdigit() or len(num) != 10:
-        return {"status": "error", "message": f"Invalid Data: '{num}' is not a 10-digit mobile number"}
+    # Dynamic detection whether Telegram handle/username or mobile number
+    is_telegram_query = False
+    if any(c.isalpha() for c in num) or num.startswith("@") or "_" in num:
+        is_telegram_query = True
+
+    if is_telegram_query:
+        if len(num) < 3:
+            return {"status": "error", "message": "Invalid Telegram handle: Username must be at least 3 characters long."}
+    else:
+        # Strict 10-Digit Validation
+        if not num.isdigit() or len(num) != 10:
+            return {"status": "error", "message": f"Invalid Data: '{num}' is not a 10-digit mobile number"}
 
     # 3. Master Key / System Key Check (Optional: For your own website)
     is_master = key == "TX-SYSTEM-INTERNAL-ADMIN" # You can use this for your website
@@ -463,6 +472,130 @@ async def saas_lookup(
             return {"status": "error", "message": "Quota Exhausted: Plan limit reached"}
 
         # 7. Intelligence Source Fetch
+        if is_telegram_query:
+            # Check Telegram Protection
+            is_protected = False
+            tg_clean = num.lstrip('@')
+            tg_at = f"@{tg_clean}"
+            try:
+                protected_query = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_clean).execute()
+                if protected_query.data:
+                    is_protected = True
+                else:
+                    protected_query_at = db.table("protected_telegrams").select("telegram_id").eq("telegram_id", tg_at).execute()
+                    if protected_query_at.data:
+                        is_protected = True
+            except Exception as e:
+                print(f"[PROTECT_ERR] {e}")
+
+            if is_protected:
+                # Deduct key count / log search telemetry
+                new_count = (license.get('requests_used') or 0) + 1
+                if not is_master:
+                    db.table("api_keys").update({
+                        "requests_used": new_count,
+                        "last_used_at": datetime.utcnow().isoformat()
+                    }).eq("id", license['id']).execute()
+                    
+                return {
+                    "status": "success",
+                    "message": "Protected: This Telegram account is protected on TRACEXDATA. 🛡️",
+                    "results": {
+                        "Telegram Match": {
+                            "name": "PROTECTED RECORD",
+                            "telegram_id": num,
+                            "mobile": "PROTECTED @ TRACEX SHIELD",
+                            "father_name": "PROTECTED @ TRACEX SHIELD",
+                            "alt_mobile": "PROTECTED @ TRACEX SHIELD",
+                            "email": "PROTECTED @ TRACEX SHIELD",
+                            "operator": "PROTECTED @ TRACEX SHIELD",
+                            "state_circle": "PROTECTED @ TRACEX SHIELD",
+                            "address": "PROTECTED @ TRACEX SHIELD",
+                            "platform": "Telegram Lookup"
+                        }
+                    }
+                }
+
+            # LIVE API CALL FOR TELEGRAM LOOKUP
+            target_username = num if num.startswith('@') else f"@{num}"
+            api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+                "Accept": "text/plain,text/html,application/json,*/*"
+            }
+
+            resp = requests.get(api_url, timeout=15, headers=headers)
+            if resp.status_code != 200:
+                return {"status": "error", "message": "api error"}
+
+            text = resp.text or ""
+            cleanedText = text.replace("@Cyb3rS0ldier", "")
+            lowerText = cleanedText.lower()
+
+            if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
+                return {"status": "error", "message": "no result"}
+
+            import re
+            usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
+            idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+            phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+            countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+            codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
+
+            username = usernameMatch.group(1).strip() if usernameMatch else target_username
+            telegram_id = idMatch.group(1).strip() if idMatch else "N/A"
+            phone = phoneMatch.group(1).strip() if phoneMatch else "N/A"
+            country = countryMatch.group(1).strip() if countryMatch else "N/A"
+            country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
+
+            if telegram_id == "N/A" and phone == "N/A":
+                return {"status": "error", "message": "no result"}
+
+            results = {
+                "Telegram Match": {
+                    "name": username,
+                    "telegram_id": telegram_id,
+                    "mobile": phone,
+                    "father_name": "N/A",
+                    "alt_mobile": country_code,
+                    "email": "N/A",
+                    "operator": country,
+                    "state_circle": "N/A",
+                    "address": "N/A",
+                    "platform": "Telegram Lookup"
+                }
+            }
+
+            new_count = (license.get('requests_used') or 0) + 1
+            if not is_master:
+                db.table("api_keys").update({
+                    "requests_used": new_count,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", license['id']).execute()
+
+            # Format final response
+            output = {
+                "status": "success",
+                "success": True,
+                "results": results,
+                "credits_remaining": (int(limit) - new_count) if (limit is not None and not is_master) else 999999,
+                "requests_used": new_count if not is_master else 0,
+                "execution_time_ms": int((time.time() - start_time) * 1000)
+            }
+
+            try:
+                db.table("api_logs").insert({
+                    "api_key_id": license.get('id') if not is_master else None,
+                    "masked_number": f"TG: {num[:12]}",
+                    "status": "success",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+
+            return output
+
         target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
         try:
             settings_query = db.table("api_settings").select("real_api_url").limit(1).execute()
