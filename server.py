@@ -148,23 +148,37 @@ async def fulfill_order(order_id: str, user_id: str):
         is_api_plan = 'a15' in plan_id or 'a30' in plan_id or plan_id.startswith('api_')
         if is_api_plan:
             api_key = f"tx_{secrets.token_hex(16)}"
-            days = 15
-            limit = 500
-            plan_name = "15 Days API (500 Req)"
+            days = 30
+            limit = None
+            plan_name = "Number Lookup (1 Month)"
 
-            if 'unl' in plan_id:
-                limit = None
-                plan_name = "15 Days Unlimited API" if '15' in plan_id else "1 Month Unlimited API"
-            
-            if '30' in plan_id:
-                days = 30
-            
-            if '1000' in plan_id:
-                limit = 1000
-                plan_name = "1 Month API (1000 Req)"
-            elif '500' in plan_id:
+            if plan_id == 'api_number':
+                plan_name = "Number Lookup (1 Month)"
+            elif plan_id == 'api_telegram':
+                plan_name = "Telegram Lookup (1 Month)"
+            elif plan_id == 'api_identity':
+                plan_name = "Identity Card Lookup (1 Month)"
+            elif plan_id == 'api_bank':
+                plan_name = "BA&NK Lookup (1 Month)"
+            elif plan_id == 'api_rasion':
+                plan_name = "Rasion Card Lookup (1 Month)"
+            elif plan_id == 'api_combo':
+                plan_name = "All Combo Special (1 Month)"
+            else:
+                days = 15
                 limit = 500
                 plan_name = "15 Days API (500 Req)"
+                if 'unl' in plan_id:
+                    limit = None
+                    plan_name = "15 Days Unlimited API" if '15' in plan_id else "1 Month Unlimited API"
+                if '30' in plan_id:
+                    days = 30
+                if '1000' in plan_id:
+                    limit = 1000
+                    plan_name = "1 Month API (1000 Req)"
+                elif '500' in plan_id:
+                    limit = 500
+                    plan_name = "15 Days API (500 Req)"
 
             expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
             
@@ -180,7 +194,7 @@ async def fulfill_order(order_id: str, user_id: str):
             }).execute()
 
             db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
-            print(f"[FULFILL] Created API Key for {user_id}")
+            print(f"[FULFILL] Created API Key for {user_id} of plan {plan_name}")
             return
 
         # Regular Credit/Unlimited Plans
@@ -1091,9 +1105,526 @@ async def telegram_lookup(
         print(f"Telegram Proxy error: {err}")
         return make_api_response({"status": "error", "message": "api error"})
 
-# Disabled block placeholder to maintain structure
-def disabled_telegram_placeholder():
-    pass
+@app.get("/api/identity")
+async def identity_lookup(
+    request: Request,
+    key: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    aadhar: Optional[str] = Query(None),
+    identity: Optional[str] = Query(None),
+    exploits: Optional[str] = Query(None)
+):
+    import re
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    target_query = (query or aadhar or identity or exploits or "").strip()
+    
+    if not target_query:
+        return make_api_response({"status": "error", "message": "Identity/Aadhaar query parameter is required"})
+        
+    # Clean to digits only
+    target_query = re.sub(r'[^0-9]', '', target_query)
+    if len(target_query) != 12:
+        return make_api_response({"status": "error", "message": "Invalid Query: Aadhaar must be a 12-digit numeric identifier"})
+        
+    db = get_supabase()
+    if not db:
+        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
+        
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+    key_record = None
+    
+    if is_master:
+        key_record = {
+            "id": "master",
+            "plan_name": "Internal Master API",
+            "status": "active",
+            "requests_used": 0,
+            "request_limit": None
+        }
+    else:
+        if not key:
+            return make_api_response({"status": "error", "message": "API key is required"})
+            
+        try:
+            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+            if not auth_query.data or len(auth_query.data) == 0:
+                return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
+                
+            key_record = auth_query.data[0]
+            if key_record.get('status') != 'active':
+                return make_api_response({
+                    "status": "error",
+                    "message": "Subscription Blocked: API key expired or suspended",
+                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                })
+                
+            # Expiry check
+            if key_record.get('expires_at'):
+                try:
+                    clean_expires = key_record['expires_at'].replace('Z', '')
+                    if '+' in clean_expires:
+                        clean_expires = clean_expires.split('+')[0]
+                    exp_date = datetime.fromisoformat(clean_expires)
+                    if exp_date < datetime.utcnow():
+                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
+                except Exception as ex_err:
+                    print(f"[EXP_PARSE_ERR] {ex_err}")
+                    
+            # Usage check
+            requests_used = key_record.get('requests_used') or 0
+            limit = key_record.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
+                return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
+                
+            # Permission check
+            plan_upper = str(key_record.get('plan_name') or "").upper()
+            is_allowed = any(p in plan_upper for p in ["ADHR", "IDENTITY", "AADH", "COMBO", "MASTER", "INTERNAL"])
+            if not is_allowed:
+                return make_api_response({
+                    "status": "error",
+                    "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated an 'identity' query."
+                })
+        except Exception as db_err:
+            print(f"[DB_ERR] {db_err}")
+            return make_api_response({"status": "error", "message": "api error"})
+            
+    # Proxy fetch
+    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//aadhar.php?exploits={requests.utils.quote(target_query)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+        "Accept": "application/json,text/plain,*/*"
+    }
+    
+    try:
+        resp = requests.get(api_url, timeout=15, headers=headers)
+        if resp.status_code != 200:
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"ADHR: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        text = resp.text or ""
+        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
+        lower_text = cleaned_text.lower()
+        
+        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"ADHR: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        import json
+        try:
+            parsed_data = json.loads(cleaned_text)
+        except Exception:
+            parsed_data = {"raw_data": cleaned_text}
+            
+        cleaned_data = clean_branding_recursive(parsed_data)
+        
+        # Telemetry updates
+        if not is_master and key_record:
+            try:
+                db.table("api_keys").update({
+                    "requests_used": (key_record.get('requests_used') or 0) + 1,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", key_record['id']).execute()
+            except Exception as up_err:
+                print(f"[TELEMETRY_ERR] {up_err}")
+                
+        # API Log
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"ADHR: {masked_q}",
+                "status": "success",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        
+        return make_api_response({"status": "success", "results": cleaned_data})
+        
+    except Exception as fetch_err:
+        print(f"[Identity Fetch Error] {fetch_err}")
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"ADHR: {masked_q}",
+                "status": "failed",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        return make_api_response({"status": "error", "message": "api error"})
+
+@app.get("/api/bank")
+async def bank_lookup(
+    request: Request,
+    key: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    ifsc: Optional[str] = Query(None),
+    bank: Optional[str] = Query(None),
+    exploits: Optional[str] = Query(None)
+):
+    import re
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    target_query = (query or ifsc or bank or exploits or "").strip()
+    
+    if not target_query:
+        return make_api_response({"status": "error", "message": "Bank/IFSC query parameter is required"})
+        
+    # Clean to alphanumeric and uppercase
+    target_query = re.sub(r'[^a-zA-Z0-9]', '', target_query).upper()
+    if len(target_query) != 11:
+        return make_api_response({"status": "error", "message": "Invalid Query: IFSC must be an 11-character alphanumeric code"})
+        
+    db = get_supabase()
+    if not db:
+        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
+        
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+    key_record = None
+    
+    if is_master:
+        key_record = {
+            "id": "master",
+            "plan_name": "Internal Master API",
+            "status": "active",
+            "requests_used": 0,
+            "request_limit": None
+        }
+    else:
+        if not key:
+            return make_api_response({"status": "error", "message": "API key is required"})
+            
+        try:
+            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+            if not auth_query.data or len(auth_query.data) == 0:
+                return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
+                
+            key_record = auth_query.data[0]
+            if key_record.get('status') != 'active':
+                return make_api_response({
+                    "status": "error",
+                    "message": "Subscription Blocked: API key expired or suspended",
+                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                })
+                
+            # Expiry check
+            if key_record.get('expires_at'):
+                try:
+                    clean_expires = key_record['expires_at'].replace('Z', '')
+                    if '+' in clean_expires:
+                        clean_expires = clean_expires.split('+')[0]
+                    exp_date = datetime.fromisoformat(clean_expires)
+                    if exp_date < datetime.utcnow():
+                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
+                except Exception as ex_err:
+                    print(f"[EXP_PARSE_ERR] {ex_err}")
+                    
+            # Usage check
+            requests_used = key_record.get('requests_used') or 0
+            limit = key_record.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
+                return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
+                
+            # Permission check
+            plan_upper = str(key_record.get('plan_name') or "").upper()
+            is_allowed = any(p in plan_upper for p in ["BNK", "BANK", "COMBO", "MASTER", "INTERNAL"])
+            if not is_allowed:
+                return make_api_response({
+                    "status": "error",
+                    "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'bank' query."
+                })
+        except Exception as db_err:
+            print(f"[DB_ERR] {db_err}")
+            return make_api_response({"status": "error", "message": "api error"})
+            
+    # Proxy fetch
+    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/ifsc.php?exploits={requests.utils.quote(target_query)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+        "Accept": "application/json,text/plain,*/*"
+    }
+    
+    try:
+        resp = requests.get(api_url, timeout=15, headers=headers)
+        if resp.status_code != 200:
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-2:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"BNK: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        text = resp.text or ""
+        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
+        lower_text = cleaned_text.lower()
+        
+        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-2:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"BNK: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        import json
+        try:
+            parsed_data = json.loads(cleaned_text)
+        except Exception:
+            parsed_data = {"raw_data": cleaned_text}
+            
+        cleaned_data = clean_branding_recursive(parsed_data)
+        
+        # Telemetry updates
+        if not is_master and key_record:
+            try:
+                db.table("api_keys").update({
+                    "requests_used": (key_record.get('requests_used') or 0) + 1,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", key_record['id']).execute()
+            except Exception as up_err:
+                print(f"[TELEMETRY_ERR] {up_err}")
+                
+        # API Log
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-2:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"BNK: {masked_q}",
+                "status": "success",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        
+        return make_api_response({"status": "success", "results": cleaned_data})
+        
+    except Exception as fetch_err:
+        print(f"[Bank Fetch Error] {fetch_err}")
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-2:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"BNK: {masked_q}",
+                "status": "failed",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        return make_api_response({"status": "error", "message": "api error"})
+
+@app.get("/api/rasion")
+@app.get("/api/ration")
+async def rasion_lookup(
+    request: Request,
+    key: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    family: Optional[str] = Query(None),
+    rasion: Optional[str] = Query(None),
+    ration: Optional[str] = Query(None),
+    exploits: Optional[str] = Query(None)
+):
+    import re
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    target_query = (query or family or rasion or ration or exploits or "").strip()
+    
+    if not target_query:
+        return make_api_response({"status": "error", "message": "Rasion query parameter is required"})
+        
+    # Clean to digits only
+    target_query = re.sub(r'[^0-9]', '', target_query)
+    if len(target_query) != 12:
+        return make_api_response({"status": "error", "message": "Invalid Query: Rasion Card must be a 12-digit numeric identifier"})
+        
+    db = get_supabase()
+    if not db:
+        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
+        
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+    key_record = None
+    
+    if is_master:
+        key_record = {
+            "id": "master",
+            "plan_name": "Internal Master API",
+            "status": "active",
+            "requests_used": 0,
+            "request_limit": None
+        }
+    else:
+        if not key:
+            return make_api_response({"status": "error", "message": "API key is required"})
+            
+        try:
+            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+            if not auth_query.data or len(auth_query.data) == 0:
+                return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
+                
+            key_record = auth_query.data[0]
+            if key_record.get('status') != 'active':
+                return make_api_response({
+                    "status": "error",
+                    "message": "Subscription Blocked: API key expired or suspended",
+                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                })
+                
+            # Expiry check
+            if key_record.get('expires_at'):
+                try:
+                    clean_expires = key_record['expires_at'].replace('Z', '')
+                    if '+' in clean_expires:
+                        clean_expires = clean_expires.split('+')[0]
+                    exp_date = datetime.fromisoformat(clean_expires)
+                    if exp_date < datetime.utcnow():
+                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
+                except Exception as ex_err:
+                    print(f"[EXP_PARSE_ERR] {ex_err}")
+                    
+            # Usage check
+            requests_used = key_record.get('requests_used') or 0
+            limit = key_record.get('request_limit')
+            if limit is not None and int(requests_used) >= int(limit):
+                return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
+                
+            # Permission check
+            plan_upper = str(key_record.get('plan_name') or "").upper()
+            is_allowed = any(p in plan_upper for p in ["RASION", "RATION", "COMBO", "MASTER", "INTERNAL"])
+            if not is_allowed:
+                return make_api_response({
+                    "status": "error",
+                    "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'rasion' query."
+                })
+        except Exception as db_err:
+            print(f"[DB_ERR] {db_err}")
+            return make_api_response({"status": "error", "message": "api error"})
+            
+    # Proxy fetch
+    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/family.php?exploits={requests.utils.quote(target_query)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+        "Accept": "application/json,text/plain,*/*"
+    }
+    
+    try:
+        resp = requests.get(api_url, timeout=15, headers=headers)
+        if resp.status_code != 200:
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"RASION: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        text = resp.text or ""
+        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
+        lower_text = cleaned_text.lower()
+        
+        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
+            # log failure
+            try:
+                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"RASION: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+            
+        import json
+        try:
+            parsed_data = json.loads(cleaned_text)
+        except Exception:
+            parsed_data = {"raw_data": cleaned_text}
+            
+        cleaned_data = clean_branding_recursive(parsed_data)
+        
+        # Telemetry updates
+        if not is_master and key_record:
+            try:
+                db.table("api_keys").update({
+                    "requests_used": (key_record.get('requests_used') or 0) + 1,
+                    "last_used_at": datetime.utcnow().isoformat()
+                }).eq("id", key_record['id']).execute()
+            except Exception as up_err:
+                print(f"[TELEMETRY_ERR] {up_err}")
+                
+        # API Log
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"RASION: {masked_q}",
+                "status": "success",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        
+        return make_api_response({"status": "success", "results": cleaned_data})
+        
+    except Exception as fetch_err:
+        print(f"[Rasion Fetch Error] {fetch_err}")
+        try:
+            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
+            db.table("api_logs").insert({
+                "api_key_id": key_record.get('id') if not is_master else None,
+                "masked_number": f"RASION: {masked_q}",
+                "status": "failed",
+                "response_time_ms": int((time.time() - start_time) * 1000),
+                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+            }).execute()
+        except: pass
+        return make_api_response({"status": "error", "message": "api error"})
 
 @app.get("/api/vehicle")
 async def vehicle_lookup(
