@@ -348,9 +348,15 @@ def clean_branding_text_line_by_line(raw_text: str) -> str:
     lines = raw_text.split('\n')
     cleaned_lines = []
     # Broad patterns for any kind of branding or unwanted spam lines
-    forbidden_keywords = ["cyb3r", "s0ldier", "anish", "exploits", "support", "buy api", "buy_api", "retailer", "seller", "owner", "admin", "owner:"]
+    forbidden_keywords = [
+        "cyb3r", "s0ldier", "anish", "exploits", "support", "buy api", "buy_api", 
+        "retailer", "seller", "owner", "admin", "owner:", "cyb3rs0ldier", "cyb3r_s0ldier",
+        "buy", "support:", "c143", "cyber", "soldier"
+    ]
     for line in lines:
-        line_lower = line.lower()
+        line_lower = line.lower().strip()
+        if not line_lower:
+            continue
         if any(fw in line_lower for fw in forbidden_keywords):
             continue
         # Strip some inline patterns
@@ -621,12 +627,7 @@ async def saas_lookup(
                 key=key, 
                 query=query or number or numquery
             )
-        elif service_lower in ["rasion", "ration", "family"]:
-            return await rasion_lookup(
-                request=request, 
-                key=key, 
-                query=query or number or numquery
-            )
+
 
     num = (number or query or numquery or "").strip()
 
@@ -818,7 +819,7 @@ async def saas_lookup(
         if is_telegram_query:
             # LIVE API CALL FOR TELEGRAM username LOOKUP
             target_username = num if num.startswith('@') else f"@{num}"
-            api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
+            api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//telegram.php?exploits={requests.utils.quote(target_username)}"
             
             headers = {
                 "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
@@ -828,19 +829,19 @@ async def saas_lookup(
             try:
                 resp = requests.get(api_url, timeout=15, headers=headers)
                 if resp.status_code != 200:
-                    return make_api_response({"status": "error", "message": "api error"})
+                    return make_api_response({"status": "error", "message": "API Source currently unreachable"})
 
                 text = resp.text or ""
-                cleanedText = text.replace("@Cyb3rS0ldier", "")
+                cleanedText = clean_branding_text_line_by_line(text)
                 lowerText = cleanedText.lower()
 
-                if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
-                    return make_api_response({"status": "error", "message": "no result"})
+                if "no result" in lowerText or "no records found" in lowerText or not cleanedText.strip():
+                    return make_api_response({"status": "success", "results": {}, "message": "no data found"})
 
                 import re
-                usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
-                idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
-                phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+                usernameMatch = re.search(r"(?:Username|User):\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
+                idMatch = re.search(r"(?:Telegram ID|ID):\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+                phoneMatch = re.search(r"(?:Phone Number|Mobile|Phone):\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
                 countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
                 codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
 
@@ -851,7 +852,11 @@ async def saas_lookup(
                 country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
 
                 if telegram_id == "N/A" and phone == "N/A":
-                    return make_api_response({"status": "error", "message": "no result"})
+                    return make_api_response({
+                        "status": "success", 
+                        "results": {}, 
+                        "message": "no data found"
+                    })
 
                 # Post-fetch validation to verify protection status (both for Telegram ID and username)
                 post_protected = False
@@ -1147,7 +1152,7 @@ async def telegram_lookup(
             })
 
         target_username = targetTelegramId if targetTelegramId.startswith('@') else f"@{targetTelegramId}"
-        api_url = f"https://exploitsindia.site/lookup/telegram.php?username={requests.utils.quote(target_username)}"
+        api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//telegram.php?exploits={requests.utils.quote(target_username)}"
         
         headers = {
             "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
@@ -1156,19 +1161,19 @@ async def telegram_lookup(
 
         resp = requests.get(api_url, timeout=15, headers=headers)
         if resp.status_code != 200:
-            return make_api_response({"status": "error", "message": "api error"})
+            return make_api_response({"status": "error", "message": "API Source currently unreachable"})
 
         text = resp.text or ""
-        cleanedText = text.replace("@Cyb3rS0ldier", "")
+        cleanedText = clean_branding_text_line_by_line(text)
         lowerText = cleanedText.lower()
 
-        if "no result" in lowerText or "no records found" in lowerText or "error" in lowerText or not text.strip():
-            return make_api_response({"status": "error", "message": "no result"})
+        if "no result" in lowerText or "no records found" in lowerText or not cleanedText.strip():
+            return make_api_response({"status": "success", "results": {}, "message": "no data found"})
 
         import re
-        usernameMatch = re.search(r"Username:\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
-        idMatch = re.search(r"Telegram ID:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
-        phoneMatch = re.search(r"Phone Number:\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+        usernameMatch = re.search(r"(?:Username|User):\s*([^\s\n\r]+)", cleanedText, re.IGNORECASE)
+        idMatch = re.search(r"(?:Telegram ID|ID):\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
+        phoneMatch = re.search(r"(?:Phone Number|Mobile|Phone):\s*(?:<code>)?(\d+)(?:<\/code>)?", cleanedText, re.IGNORECASE)
         countryMatch = re.search(r"Country:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
         codeMatch = re.search(r"Country Code:\s*([^\n\r]+)", cleanedText, re.IGNORECASE)
 
@@ -1179,7 +1184,11 @@ async def telegram_lookup(
         country_code = codeMatch.group(1).strip() if codeMatch else "N/A"
 
         if telegram_id == "N/A" and phone == "N/A":
-            return make_api_response({"status": "error", "message": "no result"})
+            return make_api_response({
+                "status": "success", 
+                "results": {}, 
+                "message": "no data found"
+            })
 
         # Post-fetch validation to verify protection status (both for Telegram ID and username)
         post_protected = False
@@ -1349,7 +1358,7 @@ async def identity_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
     # Proxy fetch
-    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//aadhar.php?exploits={requests.utils.quote(target_query)}"
+    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//aadhar.php?exploits={target_query}"
     headers = {
         "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
         "Accept": "application/json,text/plain,*/*"
@@ -1372,10 +1381,11 @@ async def identity_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
         text = resp.text or ""
+        cleaned_body = clean_branding_text_line_by_line(text)
         parsed_records = parse_raw_text_to_records(text, target_query)
         
         # Telemetry updates (only deduct if we succeeded in parsing records)
-        if parsed_records and not is_master and key_record:
+        if (parsed_records or cleaned_body.strip()) and not is_master and key_record:
             try:
                 db.table("api_keys").update({
                     "requests_used": (key_record.get('requests_used') or 0) + 1,
@@ -1386,7 +1396,7 @@ async def identity_lookup(
                 
         # API Log
         try:
-            status_str = "success" if parsed_records else "failed"
+            status_str = "success" if (parsed_records or cleaned_body.strip()) else "failed"
             masked_q = f"{target_query[:4]}****{target_query[-4:]}"
             db.table("api_logs").insert({
                 "api_key_id": key_record.get('id') if not is_master else None,
@@ -1397,7 +1407,18 @@ async def identity_lookup(
             }).execute()
         except: pass
         
-        return make_api_response({"status": "success", "results": parsed_records})
+        if not parsed_records and not cleaned_body.strip():
+            return make_api_response({
+                "status": "success", 
+                "results": {}, 
+                "message": "no data found"
+            })
+            
+        return make_api_response({
+            "status": "success", 
+            "results": {}, 
+            "raw_results": cleaned_body
+        })
         
     except Exception as fetch_err:
         print(f"[Identity Fetch Error] {fetch_err}")
@@ -1500,7 +1521,7 @@ async def bank_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
     # Proxy fetch
-    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/ifsc.php?exploits={requests.utils.quote(target_query)}"
+    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/ifsc.php?exploits={target_query}"
     headers = {
         "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
         "Accept": "application/json,text/plain,*/*"
@@ -1523,10 +1544,11 @@ async def bank_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
         text = resp.text or ""
+        cleaned_body = clean_branding_text_line_by_line(text)
         parsed_records = parse_raw_text_to_records(text, target_query)
         
         # Telemetry updates (only deduct if we succeeded in parsing records)
-        if parsed_records and not is_master and key_record:
+        if (parsed_records or cleaned_body.strip()) and not is_master and key_record:
             try:
                 db.table("api_keys").update({
                     "requests_used": (key_record.get('requests_used') or 0) + 1,
@@ -1537,7 +1559,7 @@ async def bank_lookup(
                 
         # API Log
         try:
-            status_str = "success" if parsed_records else "failed"
+            status_str = "success" if (parsed_records or cleaned_body.strip()) else "failed"
             masked_q = f"{target_query[:4]}****{target_query[-2:]}"
             db.table("api_logs").insert({
                 "api_key_id": key_record.get('id') if not is_master else None,
@@ -1548,7 +1570,18 @@ async def bank_lookup(
             }).execute()
         except: pass
         
-        return make_api_response({"status": "success", "results": parsed_records})
+        if not parsed_records and not cleaned_body.strip():
+            return make_api_response({
+                "status": "success", 
+                "results": {}, 
+                "message": "no data found"
+            })
+            
+        return make_api_response({
+            "status": "success", 
+            "results": {},
+            "raw_results": cleaned_body
+        })
         
     except Exception as fetch_err:
         print(f"[Bank Fetch Error] {fetch_err}")
@@ -1564,158 +1597,7 @@ async def bank_lookup(
         except: pass
         return make_api_response({"status": "error", "message": "Third-party lookup engine is currently unresponsive"})
 
-@app.get("/api/rasion")
-@app.get("/api/ration")
-async def rasion_lookup(
-    request: Request,
-    key: Optional[str] = Query(None),
-    query: Optional[str] = Query(None),
-    family: Optional[str] = Query(None),
-    rasion: Optional[str] = Query(None),
-    ration: Optional[str] = Query(None),
-    exploits: Optional[str] = Query(None)
-):
-    import re
-    import time
-    from datetime import datetime
-    
-    start_time = time.time()
-    target_query = (query or family or rasion or ration or exploits or "").strip()
-    
-    if not target_query:
-        return make_api_response({"status": "error", "message": "Rasion query parameter is required"})
-        
-    # Clean to digits only
-    target_query = re.sub(r'[^0-9]', '', target_query)
-    if len(target_query) != 12:
-        return make_api_response({"status": "error", "message": "Invalid Query: Rasion Card must be a 12-digit numeric identifier"})
-        
-    db = get_supabase()
-    if not db:
-        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
-        
-    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
-    key_record = None
-    
-    if is_master:
-        key_record = {
-            "id": "master",
-            "plan_name": "Internal Master API",
-            "status": "active",
-            "requests_used": 0,
-            "request_limit": None
-        }
-    else:
-        if not key:
-            return make_api_response({"status": "error", "message": "API key is required"})
-            
-        try:
-            auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
-            if not auth_query.data or len(auth_query.data) == 0:
-                return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
-                
-            key_record = auth_query.data[0]
-            if key_record.get('status') != 'active':
-                return make_api_response({
-                    "status": "error",
-                    "message": "Subscription Blocked: API key expired or suspended",
-                    "buy_url": "https://tracexdata-api.onrender.com/buy-api"
-                })
-                
-            # Expiry check
-            if key_record.get('expires_at'):
-                try:
-                    clean_expires = key_record['expires_at'].replace('Z', '')
-                    if '+' in clean_expires:
-                        clean_expires = clean_expires.split('+')[0]
-                    exp_date = datetime.fromisoformat(clean_expires)
-                    if exp_date < datetime.utcnow():
-                        return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
-                except Exception as ex_err:
-                    print(f"[EXP_PARSE_ERR] {ex_err}")
-                    
-            # Usage check
-            requests_used = key_record.get('requests_used') or 0
-            limit = key_record.get('request_limit')
-            if limit is not None and int(requests_used) >= int(limit):
-                return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
-                
-            # Permission check
-            plan_upper = str(key_record.get('plan_name') or "").upper()
-            is_allowed = any(p in plan_upper for p in ["RASION", "RATION", "COMBO", "MASTER", "INTERNAL"])
-            if not is_allowed:
-                return make_api_response({
-                    "status": "error",
-                    "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'rasion' query."
-                })
-        except Exception as db_err:
-            print(f"[DB_ERR] {db_err}")
-            return make_api_response({"status": "error", "message": "api error"})
-            
-    # Proxy fetch
-    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/family.php?exploits={requests.utils.quote(target_query)}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
-        "Accept": "application/json,text/plain,*/*"
-    }
-    
-    try:
-        resp = requests.get(api_url, timeout=15, headers=headers)
-        if resp.status_code != 200:
-            # log failure
-            try:
-                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
-                db.table("api_logs").insert({
-                    "api_key_id": key_record.get('id') if not is_master else None,
-                    "masked_number": f"RASION: {masked_q}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000),
-                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-                }).execute()
-            except: pass
-            return make_api_response({"status": "error", "message": "api error"})
-            
-        text = resp.text or ""
-        parsed_records = parse_raw_text_to_records(text, target_query)
-        
-        # Telemetry updates (only deduct if we succeeded in parsing records)
-        if parsed_records and not is_master and key_record:
-            try:
-                db.table("api_keys").update({
-                    "requests_used": (key_record.get('requests_used') or 0) + 1,
-                    "last_used_at": datetime.utcnow().isoformat()
-                }).eq("id", key_record['id']).execute()
-            except Exception as up_err:
-                print(f"[TELEMETRY_ERR] {up_err}")
-                
-        # API Log
-        try:
-            status_str = "success" if parsed_records else "failed"
-            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
-            db.table("api_logs").insert({
-                "api_key_id": key_record.get('id') if not is_master else None,
-                "masked_number": f"RASION: {masked_q}",
-                "status": status_str,
-                "response_time_ms": int((time.time() - start_time) * 1000),
-                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-            }).execute()
-        except: pass
-        
-        return make_api_response({"status": "success", "results": parsed_records})
-        
-    except Exception as fetch_err:
-        print(f"[Rasion Fetch Error] {fetch_err}")
-        try:
-            masked_q = f"{target_query[:4]}****{target_query[-4:]}"
-            db.table("api_logs").insert({
-                "api_key_id": key_record.get('id') if not is_master else None,
-                "masked_number": f"RASION: {masked_q}",
-                "status": "failed",
-                "response_time_ms": int((time.time() - start_time) * 1000),
-                "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-            }).execute()
-        except: pass
-        return make_api_response({"status": "error", "message": "Third-party lookup engine is currently unresponsive"})
+
 
 @app.get("/api/vehicle")
 async def vehicle_lookup(
