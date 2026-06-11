@@ -16,16 +16,6 @@ RATE_LIMIT = 5 # requests
 RATE_WINDOW = 10 # seconds
 
 def check_rate_limit(request: Request):
-    client_ip = request.headers.get('x-forwarded-for', request.client.host) or "unknown"
-    now = time.time()
-    
-    # Clean up old timestamps
-    ip_records[client_ip] = [ts for ts in ip_records[client_ip] if now - ts < RATE_WINDOW]
-    
-    if len(ip_records[client_ip]) >= RATE_LIMIT:
-        return False
-        
-    ip_records[client_ip].append(now)
     return True
 
 def is_valid_uuid(val):
@@ -627,6 +617,12 @@ async def saas_lookup(
                 key=key, 
                 query=query or number or numquery
             )
+        elif service_lower in ["telegram", "tg", "tele"]:
+            return await telegram_lookup(
+                request=request, 
+                key=key, 
+                query=query or number or numquery
+            )
 
 
     num = (number or query or numquery or "").strip()
@@ -680,6 +676,26 @@ async def saas_lookup(
             license = {"id": "system", "plan_name": "Internal VIP", "requests_used": 0, "expires_at": "Never"}
             user_id = None
             user_email = None
+
+        # Check permission for Number Lookup
+        plan_name = license.get('plan_name') or ""
+        plan_upper = str(plan_name).upper()
+        is_num_allowed = any(p in plan_upper for p in ["NUMBER", "PRO", "INFINITY", "COMBO", "SPECIAL", "MASTER", "INTERNAL", "VIP", "SYSTEM"])
+        if not is_num_allowed:
+            return make_api_response({
+                "status": "error",
+                "message": f"Access Denied: Your API key is authorized for '{plan_name}' but you initiated a 'number' query."
+            })
+
+        # Format safety check for strict Number Lookup keys
+        is_strict_number_plan = "NUMBER" in plan_upper and not any(p in plan_upper for p in ["COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP"])
+        if is_strict_number_plan:
+            # Under a strict number lookup plan, only simple 10 digit number is allowed
+            if not num.isdigit() or len(num) != 10:
+                return make_api_response({
+                    "status": "error",
+                    "message": "Your plan is of number lookup so please enter 10 digit number"
+                })
 
         # Check presence of input target
         if not num:
@@ -1114,6 +1130,26 @@ async def telegram_lookup(
             if limit is not None and int(requests_used) >= int(limit):
                 return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
 
+        # Permission check
+        plan_name = keyRecord.get('plan_name') or ""
+        plan_upper = str(plan_name).upper()
+        is_allowed = any(p in plan_upper for p in ["TELEGRAM", "PRO", "INFINITY", "COMBO", "SPECIAL", "MASTER", "INTERNAL", "VIP", "SYSTEM"])
+        if not is_allowed:
+            return make_api_response({
+                "status": "error",
+                "message": f"Access Denied: Your API key is authorized for '{plan_name}' but you initiated a 'telegram' query."
+            })
+            
+        # Format check for strict telegram
+        is_strict_telegram_plan = "TELEGRAM" in plan_upper and not any(p in plan_upper for p in ["COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP"])
+        if is_strict_telegram_plan:
+            cleaned_tg = targetTelegramId.lstrip('@')
+            if cleaned_tg.isdigit() or len(cleaned_tg) < 3 or not any(c.isalpha() for c in cleaned_tg):
+                return make_api_response({
+                    "status": "error",
+                    "message": "Your plan is of telegram lookup so please enter telegram username"
+                })
+
         # Checking safety protection bypass
         is_protected = False
         try:
@@ -1353,6 +1389,15 @@ async def identity_lookup(
                     "status": "error",
                     "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated an 'identity' query."
                 })
+            
+            # Format validation for strict Identity plans
+            is_strict_identity_plan = any(p in plan_upper for p in ["ADHR", "IDENTITY", "AADH"]) and not any(p in plan_upper for p in ["COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP"])
+            if is_strict_identity_plan:
+                if not target_query.isdigit() or len(target_query) != 12:
+                    return make_api_response({
+                        "status": "error",
+                        "message": "Your plan is of identity lookup so please enter 12 digit number"
+                    })
         except Exception as db_err:
             print(f"[DB_ERR] {db_err}")
             return make_api_response({"status": "error", "message": "api error"})
@@ -1510,12 +1555,21 @@ async def bank_lookup(
                 
             # Permission check
             plan_upper = str(key_record.get('plan_name') or "").upper()
-            is_allowed = any(p in plan_upper for p in ["BNK", "BANK", "COMBO", "MASTER", "INTERNAL"])
+            is_allowed = any(p in plan_upper for p in ["BNK", "BANK", "BA&NK", "COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP", "SYSTEM"])
             if not is_allowed:
                 return make_api_response({
                     "status": "error",
                     "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'bank' query."
                 })
+                
+            # Format validation for strict Bank plans
+            is_strict_bank_plan = any(p in plan_upper for p in ["BNK", "BANK", "BA&NK"]) and not any(p in plan_upper for p in ["COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP"])
+            if is_strict_bank_plan:
+                if len(target_query) != 11:
+                    return make_api_response({
+                        "status": "error",
+                        "message": "Your plan is of bank lookup so please enter 11 digit alphanumeric IFSC code"
+                    })
         except Exception as db_err:
             print(f"[DB_ERR] {db_err}")
             return make_api_response({"status": "error", "message": "api error"})
