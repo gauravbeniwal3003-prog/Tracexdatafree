@@ -258,7 +258,7 @@ async def create_order(payload: dict = Body(...), request: Request = None):
     customer_phone = payload.get("customer_phone", "9999999999")
     
     # Default origin fallback
-    origin = "https://tracexnumber.web.app"
+    origin = "https://tracexdata-api.onrender.com"
     if request and request.headers.get("origin"):
         origin = request.headers.get("origin")
         
@@ -341,6 +341,139 @@ async def get_status(order_id: str):
         return {"error": str(e)}
 
 # --- THE "TECH VISHAL" STYLE FORMATTER ---
+def clean_branding_text_line_by_line(raw_text: str) -> str:
+    if not raw_text:
+        return ""
+    import re
+    lines = raw_text.split('\n')
+    cleaned_lines = []
+    # Broad patterns for any kind of branding or unwanted spam lines
+    forbidden_keywords = ["cyb3r", "s0ldier", "anish", "exploits", "support", "buy api", "buy_api", "retailer", "seller", "owner", "admin", "owner:"]
+    for line in lines:
+        line_lower = line.lower()
+        if any(fw in line_lower for fw in forbidden_keywords):
+            continue
+        # Strip some inline patterns
+        line = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', line, flags=re.IGNORECASE)
+        # Strip code tag elements
+        line = re.sub(r'<\/?code>', '', line)
+        cleaned_lines.append(line)
+    return '\n'.join(cleaned_lines)
+
+def parse_raw_text_to_records(raw_text: str, query_val: str = None) -> dict:
+    import re
+    if not raw_text or not raw_text.strip():
+        return {}
+        
+    cleaned_body = clean_branding_text_line_by_line(raw_text)
+    lower_body = cleaned_body.lower()
+    
+    # If the response indicates empty result, return empty dictionary
+    if any(term in lower_body for term in ["no result", "no records found", "unknown field", "invalid number", "not found"]):
+        return {}
+        
+    # Split text into sections by common delimiters
+    parts = re.split(r'─{5,}|━{5,}|📌?\s*Additional\s*Result:?', cleaned_body)
+    
+    records = {}
+    record_idx = 1
+    
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+            
+        part_lower = part.lower()
+        # Avoid section headers/footers with no useful fields
+        if not any(k in part_lower for k in ["name", "mobile", "phone", "address", "branch", "ifsc", "aadhaar", "identity", "family"]):
+            continue
+            
+        record_data = {}
+        part_lines = part.split('\n')
+        
+        for line in part_lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Strip emojis. Use a simple unicode regex
+            emoji_pattern = re.compile(
+                r'[\u2600-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]', 
+                re.UNICODE
+            )
+            clean_line = emoji_pattern.sub('', line).strip()
+            clean_line = clean_line.replace('*', '').strip()
+            
+            if ':' in clean_line:
+                parts_kv = clean_line.split(':', 1)
+                key_raw = parts_kv[0].strip()
+                val_raw = parts_kv[1].strip()
+                
+                # Strip HTML tags
+                val_raw = re.sub(r'<\/?code>', '', val_raw).strip()
+                
+                if not val_raw or val_raw.upper() in ["", "NONE", "NULL", "N/A"]:
+                    continue
+                    
+                key_lower = key_raw.lower()
+                
+                # Standardize fields to match ResultCard definitions
+                if "name" in key_lower and "father" not in key_lower:
+                    record_data["name"] = val_raw
+                elif "father" in key_lower:
+                    record_data["father_name"] = val_raw
+                elif "mobile" in key_lower or "phone" in key_lower:
+                    record_data["mobile"] = val_raw
+                elif "address" in key_lower:
+                    record_data["address"] = val_raw
+                elif "aadhaar" in key_lower or "identity" in key_lower:
+                    record_data["aadhar_number"] = val_raw
+                elif "circle" in key_lower or "operator" in key_lower:
+                    record_data["state_circle"] = val_raw
+                elif "branch" in key_lower:
+                    record_data["branch"] = val_raw
+                elif "ifsc" in key_lower:
+                    record_data["ifsc"] = val_raw
+                elif "city" in key_lower:
+                    record_data["city"] = val_raw
+                elif "district" in key_lower:
+                    record_data["district"] = val_raw
+                elif "state" in key_lower:
+                    record_data["state"] = val_raw
+                elif "family" in key_lower:
+                    record_data["family_id"] = val_raw
+                else:
+                    # Generic key sanitizer
+                    clean_key = re.sub(r'[^a-zA-Z0-9\s_]', '', key_raw).strip().lower().replace(' ', '_')
+                    if clean_key:
+                        record_data[clean_key] = val_raw
+                        
+        if record_data:
+            # Set default main name key so the card displays nicely
+            if "name" not in record_data:
+                if "branch" in record_data:
+                    record_data["name"] = record_data["branch"]
+                elif "ifsc" in record_data:
+                    record_data["name"] = f"IFSC: {record_data['ifsc']}"
+                elif "family_id" in record_data:
+                    record_data["name"] = f"Family ID: {record_data['family_id']}"
+                elif "aadhar_number" in record_data:
+                    record_data["name"] = f"Aadhaar: {record_data['aadhar_number']}"
+                else:
+                    record_data["name"] = "REGISTRY ENTRY"
+                    
+            records[f"Result {record_idx}"] = record_data
+            record_idx += 1
+            
+    # Fallback to single general details card if body exists but could not split structured keys
+    if not records and cleaned_body.strip():
+        records["Result 1"] = {
+            "name": "DATA ENTRY",
+            "details": cleaned_body.strip()
+        }
+        
+    return records
+
 def clean_branding_recursive(obj):
     if isinstance(obj, dict):
         return {clean_branding_recursive(k): clean_branding_recursive(v) for k, v in obj.items()}
@@ -366,13 +499,13 @@ def make_api_response(data: dict) -> dict:
     branding = {
         "provider": "TRACEXDATA",
         "developer": "@gaurav_beniwal_0001",
-        "api_buy_link": "https://tracexnumber.web.app/buy-api",
-        "website_link": "https://tracexnumber.web.app"
+        "api_buy_link": "https://tracexdata-api.onrender.com/buy-api",
+        "website_link": "https://tracexdata-api.onrender.com"
     }
     # Place directly at the root level of the response dictionary for highest visibility
     data["developer"] = "@gaurav_beniwal_0001"
-    data["api_buy_link"] = "https://tracexnumber.web.app/buy-api"
-    data["website_link"] = "https://tracexnumber.web.app"
+    data["api_buy_link"] = "https://tracexdata-api.onrender.com/buy-api"
+    data["website_link"] = "https://tracexdata-api.onrender.com"
     data["branding"] = branding
     return data
 
@@ -468,9 +601,33 @@ async def saas_lookup(
     key: Optional[str] = Query(None),
     number: Optional[str] = Query(None),
     query: Optional[str] = Query(None),
-    numquery: Optional[str] = Query(None)
+    numquery: Optional[str] = Query(None),
+    service: Optional[str] = Query(None)
 ):
     start_time = time.time()
+    
+    # Route right away if service is passed
+    if service:
+        service_lower = service.lower()
+        if service_lower in ["adhr", "identity", "aadhaar", "aadhar"]:
+            return await identity_lookup(
+                request=request, 
+                key=key, 
+                query=query or number or numquery
+            )
+        elif service_lower in ["bnk", "bank", "ifsc"]:
+            return await bank_lookup(
+                request=request, 
+                key=key, 
+                query=query or number or numquery
+            )
+        elif service_lower in ["rasion", "ration", "family"]:
+            return await rasion_lookup(
+                request=request, 
+                key=key, 
+                query=query or number or numquery
+            )
+
     num = (number or query or numquery or "").strip()
 
     try:
@@ -1158,7 +1315,7 @@ async def identity_lookup(
                 return make_api_response({
                     "status": "error",
                     "message": "Subscription Blocked: API key expired or suspended",
-                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                    "buy_url": "https://tracexdata-api.onrender.com/buy-api"
                 })
                 
             # Expiry check
@@ -1215,33 +1372,10 @@ async def identity_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
         text = resp.text or ""
-        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
-        lower_text = cleaned_text.lower()
+        parsed_records = parse_raw_text_to_records(text, target_query)
         
-        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
-            # log failure
-            try:
-                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
-                db.table("api_logs").insert({
-                    "api_key_id": key_record.get('id') if not is_master else None,
-                    "masked_number": f"ADHR: {masked_q}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000),
-                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-                }).execute()
-            except: pass
-            return make_api_response({"status": "error", "message": "api error"})
-            
-        import json
-        try:
-            parsed_data = json.loads(cleaned_text)
-        except Exception:
-            parsed_data = {"raw_data": cleaned_text}
-            
-        cleaned_data = clean_branding_recursive(parsed_data)
-        
-        # Telemetry updates
-        if not is_master and key_record:
+        # Telemetry updates (only deduct if we succeeded in parsing records)
+        if parsed_records and not is_master and key_record:
             try:
                 db.table("api_keys").update({
                     "requests_used": (key_record.get('requests_used') or 0) + 1,
@@ -1252,17 +1386,18 @@ async def identity_lookup(
                 
         # API Log
         try:
+            status_str = "success" if parsed_records else "failed"
             masked_q = f"{target_query[:4]}****{target_query[-4:]}"
             db.table("api_logs").insert({
                 "api_key_id": key_record.get('id') if not is_master else None,
                 "masked_number": f"ADHR: {masked_q}",
-                "status": "success",
+                "status": status_str,
                 "response_time_ms": int((time.time() - start_time) * 1000),
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
         
-        return make_api_response({"status": "success", "results": cleaned_data})
+        return make_api_response({"status": "success", "results": parsed_records})
         
     except Exception as fetch_err:
         print(f"[Identity Fetch Error] {fetch_err}")
@@ -1276,7 +1411,7 @@ async def identity_lookup(
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
-        return make_api_response({"status": "error", "message": "api error"})
+        return make_api_response({"status": "error", "message": "Third-party lookup engine is currently unresponsive"})
 
 @app.get("/api/bank")
 async def bank_lookup(
@@ -1331,7 +1466,7 @@ async def bank_lookup(
                 return make_api_response({
                     "status": "error",
                     "message": "Subscription Blocked: API key expired or suspended",
-                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                    "buy_url": "https://tracexdata-api.onrender.com/buy-api"
                 })
                 
             # Expiry check
@@ -1388,33 +1523,10 @@ async def bank_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
         text = resp.text or ""
-        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
-        lower_text = cleaned_text.lower()
+        parsed_records = parse_raw_text_to_records(text, target_query)
         
-        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
-            # log failure
-            try:
-                masked_q = f"{target_query[:4]}****{target_query[-2:]}"
-                db.table("api_logs").insert({
-                    "api_key_id": key_record.get('id') if not is_master else None,
-                    "masked_number": f"BNK: {masked_q}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000),
-                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-                }).execute()
-            except: pass
-            return make_api_response({"status": "error", "message": "api error"})
-            
-        import json
-        try:
-            parsed_data = json.loads(cleaned_text)
-        except Exception:
-            parsed_data = {"raw_data": cleaned_text}
-            
-        cleaned_data = clean_branding_recursive(parsed_data)
-        
-        # Telemetry updates
-        if not is_master and key_record:
+        # Telemetry updates (only deduct if we succeeded in parsing records)
+        if parsed_records and not is_master and key_record:
             try:
                 db.table("api_keys").update({
                     "requests_used": (key_record.get('requests_used') or 0) + 1,
@@ -1425,17 +1537,18 @@ async def bank_lookup(
                 
         # API Log
         try:
+            status_str = "success" if parsed_records else "failed"
             masked_q = f"{target_query[:4]}****{target_query[-2:]}"
             db.table("api_logs").insert({
                 "api_key_id": key_record.get('id') if not is_master else None,
                 "masked_number": f"BNK: {masked_q}",
-                "status": "success",
+                "status": status_str,
                 "response_time_ms": int((time.time() - start_time) * 1000),
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
         
-        return make_api_response({"status": "success", "results": cleaned_data})
+        return make_api_response({"status": "success", "results": parsed_records})
         
     except Exception as fetch_err:
         print(f"[Bank Fetch Error] {fetch_err}")
@@ -1449,7 +1562,7 @@ async def bank_lookup(
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
-        return make_api_response({"status": "error", "message": "api error"})
+        return make_api_response({"status": "error", "message": "Third-party lookup engine is currently unresponsive"})
 
 @app.get("/api/rasion")
 @app.get("/api/ration")
@@ -1506,7 +1619,7 @@ async def rasion_lookup(
                 return make_api_response({
                     "status": "error",
                     "message": "Subscription Blocked: API key expired or suspended",
-                    "buy_url": "https://tracexnumber.web.app/buy-api"
+                    "buy_url": "https://tracexdata-api.onrender.com/buy-api"
                 })
                 
             # Expiry check
@@ -1563,33 +1676,10 @@ async def rasion_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
         text = resp.text or ""
-        cleaned_text = re.sub(r'(tech[\s\-_]*vishal|anish[\s\-_]*exploits|cyb3r[\s\-_]*s0ldier|@?cyb3rs0ldier)', '', text, flags=re.IGNORECASE)
-        lower_text = cleaned_text.lower()
+        parsed_records = parse_raw_text_to_records(text, target_query)
         
-        if any(term in lower_text for term in ["no result", "no records found", "error", "unknown"]) or not text.strip():
-            # log failure
-            try:
-                masked_q = f"{target_query[:4]}****{target_query[-4:]}"
-                db.table("api_logs").insert({
-                    "api_key_id": key_record.get('id') if not is_master else None,
-                    "masked_number": f"RASION: {masked_q}",
-                    "status": "failed",
-                    "response_time_ms": int((time.time() - start_time) * 1000),
-                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
-                }).execute()
-            except: pass
-            return make_api_response({"status": "error", "message": "api error"})
-            
-        import json
-        try:
-            parsed_data = json.loads(cleaned_text)
-        except Exception:
-            parsed_data = {"raw_data": cleaned_text}
-            
-        cleaned_data = clean_branding_recursive(parsed_data)
-        
-        # Telemetry updates
-        if not is_master and key_record:
+        # Telemetry updates (only deduct if we succeeded in parsing records)
+        if parsed_records and not is_master and key_record:
             try:
                 db.table("api_keys").update({
                     "requests_used": (key_record.get('requests_used') or 0) + 1,
@@ -1600,17 +1690,18 @@ async def rasion_lookup(
                 
         # API Log
         try:
+            status_str = "success" if parsed_records else "failed"
             masked_q = f"{target_query[:4]}****{target_query[-4:]}"
             db.table("api_logs").insert({
                 "api_key_id": key_record.get('id') if not is_master else None,
                 "masked_number": f"RASION: {masked_q}",
-                "status": "success",
+                "status": status_str,
                 "response_time_ms": int((time.time() - start_time) * 1000),
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
         
-        return make_api_response({"status": "success", "results": cleaned_data})
+        return make_api_response({"status": "success", "results": parsed_records})
         
     except Exception as fetch_err:
         print(f"[Rasion Fetch Error] {fetch_err}")
@@ -1624,7 +1715,7 @@ async def rasion_lookup(
                 "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
             }).execute()
         except: pass
-        return make_api_response({"status": "error", "message": "api error"})
+        return make_api_response({"status": "error", "message": "Third-party lookup engine is currently unresponsive"})
 
 @app.get("/api/vehicle")
 async def vehicle_lookup(
@@ -1637,7 +1728,7 @@ async def vehicle_lookup(
         "status": "error",
         "success": False,
         "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
-        "buy_url": "https://tracexnumber.web.app/buy-api"
+        "buy_url": "https://tracexdata-api.onrender.com/buy-api"
     })
 
 if __name__ == "__main__":
