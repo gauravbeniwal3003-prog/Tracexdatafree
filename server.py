@@ -835,7 +835,7 @@ async def saas_lookup(
         if is_telegram_query:
             # LIVE API CALL FOR TELEGRAM username LOOKUP
             target_username = num if num.startswith('@') else f"@{num}"
-            api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//telegram.php?exploits={requests.utils.quote(target_username)}"
+            api_url = f"https://exploitsindia.site//osint-api/telegram.php?exploits={requests.utils.quote(target_username)}"
             
             headers = {
                 "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
@@ -1188,7 +1188,7 @@ async def telegram_lookup(
             })
 
         target_username = targetTelegramId if targetTelegramId.startswith('@') else f"@{targetTelegramId}"
-        api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//telegram.php?exploits={requests.utils.quote(target_username)}"
+        api_url = f"https://exploitsindia.site//osint-api/telegram.php?exploits={requests.utils.quote(target_username)}"
         
         headers = {
             "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
@@ -1403,7 +1403,7 @@ async def identity_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
     # Proxy fetch
-    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd//aadhar.php?exploits={target_query}"
+    api_url = f"https://exploitsindia.site//osint-api/aadhar.php?exploits={target_query}"
     headers = {
         "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
         "Accept": "application/json,text/plain,*/*"
@@ -1575,7 +1575,7 @@ async def bank_lookup(
             return make_api_response({"status": "error", "message": "api error"})
             
     # Proxy fetch
-    api_url = f"https://exploitsindia.site//hdhddhjdjddjdjdjdndnddnnccndndhejdmdnnd/ifsc.php?exploits={target_query}"
+    api_url = f"https://exploitsindia.site//osint-api/ifsc.php?exploits={target_query}"
     headers = {
         "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
         "Accept": "application/json,text/plain,*/*"
