@@ -1086,9 +1086,10 @@ async def telegram_lookup(
     request: Request,
     key: Optional[str] = Query(None),
     telegram: Optional[str] = Query(None),
-    query: Optional[str] = Query(None)
+    query: Optional[str] = Query(None),
+    api: Optional[str] = Query(None)
 ):
-    targetTelegramId = (query or telegram or "").strip()
+    targetTelegramId = (query or telegram or api or "").strip()
     if not targetTelegramId:
         return make_api_response({"status": "error", "message": "Telegram query parameter is required"})
 
