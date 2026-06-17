@@ -150,6 +150,10 @@ async def fulfill_order(order_id: str, user_id: str):
                 plan_name = "Identity Card Lookup (1 Month)"
             elif plan_id == 'api_bank':
                 plan_name = "BA&NK Lookup (1 Month)"
+            elif plan_id == 'api_vehicle':
+                plan_name = "Vehicle Lookup (1 Month)"
+            elif plan_id == 'api_pancard':
+                plan_name = "PN Card Lookup (1 Month)"
             elif plan_id == 'api_rasion':
                 plan_name = "Rasion Card Lookup (1 Month)"
             elif plan_id == 'api_combo':
@@ -1658,14 +1662,361 @@ async def vehicle_lookup(
     request: Request,
     key: Optional[str] = Query(None),
     rc: Optional[str] = Query(None),
-    query: Optional[str] = Query(None)
+    query: Optional[str] = Query(None),
+    vehicle: Optional[str] = Query(None),
+    vehicle_no: Optional[str] = Query(None),
+    exploits: Optional[str] = Query(None)
 ):
-    return make_api_response({
-        "status": "error",
-        "success": False,
-        "message": "This endpoint is disabled. Only the Number Details Lookup API is active and supported.",
-        "buy_url": "https://tracexdata-api.onrender.com/buy-api"
-    })
+    import re
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    target_query = (rc or query or vehicle or vehicle_no or exploits or "").strip()
+    
+    if not target_query:
+        return make_api_response({"status": "error", "message": "Vehicle lookup query parameter is required"})
+        
+    # Clean to alphanumeric and uppercase
+    target_query = re.sub(r'[^a-zA-Z0-9]', '', target_query).upper()
+    if len(target_query) < 3:
+        return make_api_response({"status": "error", "message": "Invalid Query: Vehicle plate number must be at least 3 characters long"})
+        
+    db = get_supabase()
+    if not db:
+        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
+        
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+    key_record = None
+    
+    try:
+        if is_master:
+            key_record = {
+                "id": "master",
+                "plan_name": "Internal Master API",
+                "status": "active",
+                "requests_used": 0,
+                "request_limit": None
+            }
+        else:
+            if not key:
+                return make_api_response({"status": "error", "message": "API key is required"})
+                
+            try:
+                auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+                if not auth_query.data or len(auth_query.data) == 0:
+                    return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
+                    
+                key_record = auth_query.data[0]
+                if key_record.get('status') != 'active':
+                    return make_api_response({
+                        "status": "error",
+                        "message": "Subscription Blocked: API key expired or suspended",
+                        "buy_url": "https://tracexdata-api.onrender.com/buy-api"
+                    })
+                    
+                # Expiry check
+                if key_record.get('expires_at'):
+                    try:
+                        clean_expires = key_record['expires_at'].replace('Z', '')
+                        if '+' in clean_expires:
+                            clean_expires = clean_expires.split('+')[0]
+                        exp_date = datetime.fromisoformat(clean_expires)
+                        if exp_date < datetime.utcnow():
+                            return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
+                    except Exception as ex_err:
+                        print(f"[EXP_PARSE_ERR] {ex_err}")
+                        
+                # Usage check
+                requests_used = key_record.get('requests_used') or 0
+                limit = key_record.get('request_limit')
+                if limit is not None and int(requests_used) >= int(limit):
+                    return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
+                    
+                # Permission check
+                plan_upper = str(key_record.get('plan_name') or "").upper()
+                is_allowed = any(p in plan_upper for p in ["VEHICLE", "COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP", "SYSTEM"])
+                if not is_allowed:
+                    return make_api_response({
+                        "status": "error",
+                        "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'vehicle' query."
+                    })
+                    
+                # Format validation for strict Vehicle plans
+                is_strict_vehicle_plan = "VEHICLE" in plan_upper and not any(p in plan_upper for p in ["COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP"])
+                if is_strict_vehicle_plan:
+                    if len(target_query) < 3:
+                        return make_api_response({
+                            "status": "error",
+                            "message": "Your plan is of vehicle lookup, please enter valid car number plate format"
+                        })
+            except Exception as db_err:
+                print(f"[DB_ERR] {db_err}")
+                return make_api_response({"status": "error", "message": "api error"})
+                
+        # Proxy fetch
+        api_url = f"https://exploitsindia.site//osint-api/vehicle.php?exploits={target_query}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+            "Accept": "application/json,text/plain,*/*"
+        }
+        
+        try:
+            resp = requests.get(api_url, timeout=15, headers=headers)
+            if resp.status_code != 200:
+                # log failure
+                try:
+                    masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                    db.table("api_logs").insert({
+                        "api_key_id": key_record.get('id') if not is_master else None,
+                        "masked_number": f"VEHICLE: {masked_q}",
+                        "status": "failed",
+                        "response_time_ms": int((time.time() - start_time) * 1000),
+                        "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                    }).execute()
+                except: pass
+                return make_api_response({"status": "error", "message": "api error"})
+                
+            text = resp.text or ""
+            cleaned_body = clean_branding_text_line_by_line(text)
+            lower_text = cleaned_body.lower()
+            
+            if "no result" in lower_text or "no records found" in lower_text or "error" in lower_text or not text.strip() or "unknown" in lower_text:
+                try:
+                    masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                    db.table("api_logs").insert({
+                        "api_key_id": key_record.get('id') if not is_master else None,
+                        "masked_number": f"VEHICLE: {masked_q}",
+                        "status": "failed",
+                        "response_time_ms": int((time.time() - start_time) * 1000),
+                        "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                    }).execute()
+                except: pass
+                return make_api_response({"status": "error", "message": "api error"})
+                
+            import json
+            try:
+                parsed_data = json.loads(cleaned_body)
+            except:
+                parsed_data = {"raw_data": cleaned_body}
+                
+            cleaned_data = clean_branding_recursive(parsed_data)
+            
+            # Telemetry update
+            if not is_master and key_record and key_record.get('id'):
+                try:
+                    db.table("api_keys").update({
+                        "requests_used": int(key_record.get('requests_used') or 0) + 1,
+                        "last_used_at": datetime.utcnow().isoformat()
+                    }).eq("id", key_record.get('id')).execute()
+                except Exception as up_err:
+                    print(f"[REQS_UP_ERR] {up_err}")
+                    
+            try:
+                masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"VEHICLE: {masked_q}",
+                    "status": "success",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            
+            return make_api_response({"status": "success", "results": cleaned_data})
+        except Exception as conn_err:
+            print(f"[CONN_ERR] {conn_err}")
+            try:
+                masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"VEHICLE: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+    except Exception as general_err:
+        print(f"[VEHICLE_ERR] {general_err}")
+        return make_api_response({"status": "error", "message": "api error"})
+
+
+@app.get("/api/pancard")
+async def pancard_lookup(
+    request: Request,
+    key: Optional[str] = Query(None),
+    pan: Optional[str] = Query(None),
+    pn: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    pancard: Optional[str] = Query(None),
+    exploits: Optional[str] = Query(None)
+):
+    import re
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    target_query = (pan or pn or query or pancard or exploits or "").strip()
+    
+    if not target_query:
+        return make_api_response({"status": "error", "message": "PN/PAN card query parameter is required"})
+        
+    # Clean to alphanumeric and uppercase
+    target_query = re.sub(r'[^a-zA-Z0-9]', '', target_query).upper()
+    if len(target_query) < 5:
+        return make_api_response({"status": "error", "message": "Invalid Query: PN/PAN card number must be at least 5 characters long"})
+        
+    db = get_supabase()
+    if not db:
+        return make_api_response({"status": "error", "message": "Engine Offline: Internal connection failure"})
+        
+    is_master = key == "TX-SYSTEM-INTERNAL-ADMIN"
+    key_record = None
+    
+    try:
+        if is_master:
+            key_record = {
+                "id": "master",
+                "plan_name": "Internal Master API",
+                "status": "active",
+                "requests_used": 0,
+                "request_limit": None
+            }
+        else:
+            if not key:
+                return make_api_response({"status": "error", "message": "API key is required"})
+                
+            try:
+                auth_query = db.table("api_keys").select("*").eq("api_key", key).execute()
+                if not auth_query.data or len(auth_query.data) == 0:
+                    return make_api_response({"status": "error", "message": "Access Denied: Invalid or unauthorized API key"})
+                    
+                key_record = auth_query.data[0]
+                if key_record.get('status') != 'active':
+                    return make_api_response({
+                        "status": "error",
+                        "message": "Subscription Blocked: API key expired or suspended",
+                        "buy_url": "https://tracexdata-api.onrender.com/buy-api"
+                    })
+                    
+                # Expiry check
+                if key_record.get('expires_at'):
+                    try:
+                        clean_expires = key_record['expires_at'].replace('Z', '')
+                        if '+' in clean_expires:
+                            clean_expires = clean_expires.split('+')[0]
+                        exp_date = datetime.fromisoformat(clean_expires)
+                        if exp_date < datetime.utcnow():
+                            return make_api_response({"status": "error", "message": "Key Expired: Please renew subscription"})
+                    except Exception as ex_err:
+                        print(f"[EXP_PARSE_ERR] {ex_err}")
+                        
+                # Usage check
+                requests_used = key_record.get('requests_used') or 0
+                limit = key_record.get('request_limit')
+                if limit is not None and int(requests_used) >= int(limit):
+                    return make_api_response({"status": "error", "message": "Quota Exhausted: Lookup limit reached"})
+                    
+                # Permission check
+                plan_upper = str(key_record.get('plan_name') or "").upper()
+                is_allowed = any(p in plan_upper for p in ["PAN", "PN", "COMBO", "PRO", "INFINITY", "SPECIAL", "MASTER", "INTERNAL", "VIP", "SYSTEM"])
+                if not is_allowed:
+                    return make_api_response({
+                        "status": "error",
+                        "message": f"Access Denied: Your API key is authorized for '{key_record.get('plan_name')}' but you initiated a 'pancard' query."
+                    })
+            except Exception as db_err:
+                print(f"[DB_ERR] {db_err}")
+                return make_api_response({"status": "error", "message": "api error"})
+                
+        # Proxy fetch
+        api_url = f"https://exploitsindia.site//osint-api/pancard.php?exploits={target_query}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 TraceX-Web/1.0",
+            "Accept": "application/json,text/plain,*/*"
+        }
+        
+        try:
+            resp = requests.get(api_url, timeout=15, headers=headers)
+            if resp.status_code != 200:
+                # log failure
+                try:
+                    masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                    db.table("api_logs").insert({
+                        "api_key_id": key_record.get('id') if not is_master else None,
+                        "masked_number": f"PANCARD: {masked_q}",
+                        "status": "failed",
+                        "response_time_ms": int((time.time() - start_time) * 1000),
+                        "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                    }).execute()
+                except: pass
+                return make_api_response({"status": "error", "message": "api error"})
+                
+            text = resp.text or ""
+            cleaned_body = clean_branding_text_line_by_line(text)
+            lower_text = cleaned_body.lower()
+            
+            if "no result" in lower_text or "no records found" in lower_text or "error" in lower_text or not text.strip() or "unknown" in lower_text:
+                try:
+                    masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                    db.table("api_logs").insert({
+                        "api_key_id": key_record.get('id') if not is_master else None,
+                        "masked_number": f"PANCARD: {masked_q}",
+                        "status": "failed",
+                        "response_time_ms": int((time.time() - start_time) * 1000),
+                        "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                    }).execute()
+                except: pass
+                return make_api_response({"status": "error", "message": "api error"})
+                
+            import json
+            try:
+                parsed_data = json.loads(cleaned_body)
+            except:
+                parsed_data = {"raw_data": cleaned_body}
+                
+            cleaned_data = clean_branding_recursive(parsed_data)
+            
+            # Telemetry update
+            if not is_master and key_record and key_record.get('id'):
+                try:
+                    db.table("api_keys").update({
+                        "requests_used": int(key_record.get('requests_used') or 0) + 1,
+                        "last_used_at": datetime.utcnow().isoformat()
+                    }).eq("id", key_record.get('id')).execute()
+                except Exception as up_err:
+                    print(f"[REQS_UP_ERR] {up_err}")
+                    
+            try:
+                masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"PANCARD: {masked_q}",
+                    "status": "success",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            
+            return make_api_response({"status": "success", "results": cleaned_data})
+        except Exception as conn_err:
+            print(f"[CONN_ERR] {conn_err}")
+            try:
+                masked_q = f"{target_query[:3]}****{target_query[-2:]}" if len(target_query) >= 5 else target_query
+                db.table("api_logs").insert({
+                    "api_key_id": key_record.get('id') if not is_master else None,
+                    "masked_number": f"PANCARD: {masked_q}",
+                    "status": "failed",
+                    "response_time_ms": int((time.time() - start_time) * 1000),
+                    "ip_address": request.headers.get('x-forwarded-for', request.client.host) if request else "0.0.0.0"
+                }).execute()
+            except: pass
+            return make_api_response({"status": "error", "message": "api error"})
+    except Exception as general_err:
+        print(f"[PANCARD_ERR] {general_err}")
+        return make_api_response({"status": "error", "message": "api error"})
+
 
 if __name__ == "__main__":
     import uvicorn
