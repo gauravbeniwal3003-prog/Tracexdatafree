@@ -83,9 +83,13 @@ async def fulfill_order(order_id: str, user_id: str):
 
         # Check if user_id is a valid UUID
         if not is_valid_uuid(user_id):
-            print(f"[FULFILL] Non-UUID user_id '{user_id}' skipped database state updates, marking order {order_id} fulfilled.")
-            db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
-            return
+            if claim.get('user_id') and is_valid_uuid(claim['user_id']):
+                user_id = claim['user_id']
+                print(f"[FULFILL] Resolved non-UUID to valid user_id from claim: {user_id}")
+            else:
+                print(f"[FULFILL] Non-UUID user_id '{user_id}' skipped database state updates, marking order {order_id} fulfilled.")
+                db.table("payment_claims").update({"status": "success"}).eq("payment_id", order_id).execute()
+                return
 
         # Check if it's a Protection Plan
         if plan_id.startswith('protect_'):
@@ -199,10 +203,27 @@ async def fulfill_order(order_id: str, user_id: str):
         profile = profile_query.data[0]
         update_data = {}
 
-        # Use more flexible ID checking
-        if plan_id in ['c10', 'credit_10']: update_data['credits'] = (profile.get('credits') or 0) + 10
-        elif plan_id in ['c50', 'credit_50']: update_data['credits'] = (profile.get('credits') or 0) + 50
-        elif plan_id in ['c100', 'credit_100']: update_data['credits'] = (profile.get('credits') or 0) + 100
+        # Use more flexible ID checking with dynamic numeric credits support
+        credits_to_add = 0
+        if plan_id in ['c10', 'credit_10']: credits_to_add = 10
+        elif plan_id in ['c40', 'credit_40']: credits_to_add = 40
+        elif plan_id in ['c50', 'credit_50']: credits_to_add = 50
+        elif plan_id in ['c100', 'credit_100']: credits_to_add = 100
+        elif plan_id in ['c150', 'credit_150']: credits_to_add = 150
+        elif plan_id in ['c1000', 'credit_1000']: credits_to_add = 1000
+        else:
+            # Dynamic fallback: if plan_id is of form cXX or credit_XX
+            import re
+            m = re.match(r'^(?:c|credit_?)(\d+)$', str(plan_id))
+            if m:
+                try:
+                    credits_to_add = int(m.group(1))
+                except ValueError:
+                    pass
+
+        if credits_to_add > 0:
+            update_data['credits'] = (profile.get('credits') or 0) + credits_to_add
+            print(f"[FULFILL] Determined {credits_to_add} credits to add from plan_id '{plan_id}'")
         elif plan_id.startswith('u') or plan_id.startswith('unlimited'):
             # Hours mapping
             hours_map = {
@@ -988,7 +1009,9 @@ async def saas_lookup(
             except Exception as e_tg:
                 return make_api_response({"status": "error", "message": f"Telegram API error: {str(e_tg)}"})
 
-        target_template = os.getenv("REAL_LOOKUP_URL") or os.getenv("LOOKUP_API_URL")
+        # Hardcoded primary engine source as requested to avoid environment variable dependency
+        target_template = "https://techvishalboss.com/api/v1/lookup.php"
+        
         try:
             settings_query = db.table("api_settings").select("real_api_url").limit(1).execute()
             if settings_query.data and len(settings_query.data) > 0:
@@ -999,7 +1022,7 @@ async def saas_lookup(
             pass
         
         if not target_template:
-            return make_api_response({"status": "error", "message": "ServerDown: Backend URL not configured"})
+            target_template = "https://techvishalboss.com/api/v1/lookup.php"
 
         # Force replace any old/stale API keys with the new active key to ensure the new API is used everywhere
         target_template = target_template.replace("TVB_SGL_053B3AA6", "TVB_SGL_C24439EA")
