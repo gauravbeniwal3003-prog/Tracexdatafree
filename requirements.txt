@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-supabase
-requests
-python-dotenv
-pydantic
