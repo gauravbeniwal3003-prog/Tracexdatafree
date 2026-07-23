@@ -3,25 +3,30 @@
 
 """
 Telegram Bot for Number Lookup Service
-Optimized for Render Deployment
-Version: 2.0.2 - Simple and Stable
+Optimized for Render Web Service
+Version: 2.0.5 - Web Service with Health Check
 """
 
 import os
 import logging
 import json
 import html
+import threading
+import time
 from typing import Dict, Any, List
 
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-# ==================== CONFIGURATION ====================
-# Get from environment variables for Render
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8437341863:AAG8EWGdgCcgKLhrvj96m5JSK32qPyqTfxY")
+# ==================== CONFIGURATION (FROM ENV) ====================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "tracexdatafreebot")
 API_URL = os.getenv("API_URL", "https://tracexdata-api.onrender.com/api/lookup?key=Pvttbott&number={number}")
+
+# Validate required env vars
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required!")
 
 MAX_MESSAGE_LENGTH = 4096
 
@@ -33,12 +38,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ==================== HEALTH CHECK SERVER ====================
+def run_health_server():
+    """Simple HTTP server for Render health checks."""
+    try:
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health' or self.path == '/':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'OK')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            
+            def log_message(self, format, *args):
+                pass  # Suppress logs to keep console clean
+        
+        port = int(os.getenv("PORT", 8080))
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        logger.info(f"✅ Health check server running on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
+
+
 # ==================== HELPER FUNCTIONS ====================
 
 def format_json_to_markdown(data: Any) -> str:
-    """
-    Convert JSON data to nicely formatted JSON string with markdown code block.
-    """
+    """Convert JSON data to nicely formatted JSON string with markdown code block."""
     try:
         if isinstance(data, (dict, list)):
             json_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
@@ -326,7 +357,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     """Main function to start the bot."""
     try:
-        # Create the Application - this handles event loop internally
+        # Start health check server in background (for Render web service)
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
+        time.sleep(1)  # Give the server time to start
+        
+        # Create the Application
         application = Application.builder().token(BOT_TOKEN).build()
         
         # Add command handlers
@@ -343,7 +379,7 @@ def main() -> None:
         
         # Log startup information
         logger.info("=" * 60)
-        logger.info("TraceX Free Bot v2.0.2 is starting...")
+        logger.info("TraceX Free Bot v2.0.5 is starting...")
         logger.info(f"Bot username: @{BOT_USERNAME}")
         logger.info(f"API URL: {API_URL}")
         logger.info("=" * 60)
@@ -352,12 +388,13 @@ def main() -> None:
         logger.info("   • Clean JSON output for better Telegram display")
         logger.info("   • Removed developer branding from responses")
         logger.info("   • /start command with welcome message")
-        logger.info("   • Simple and stable for Render deployment")
+        logger.info("   • Health check server for Render Web Service")
+        logger.info("   • Optimized for Render deployment")
         logger.info("=" * 60)
         logger.info("🚀 Bot is running and ready to handle requests!")
         logger.info("=" * 60)
         
-        # Start the bot - application.run_polling handles the event loop internally
+        # Start the bot
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except KeyboardInterrupt:
