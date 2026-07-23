@@ -4,11 +4,10 @@
 """
 Telegram Bot for Number Lookup Service
 Optimized for Render Deployment
-Version: 2.0.1 - Fixed for Python 3.14+
+Version: 2.0.2 - Simple and Stable
 """
 
 import os
-import asyncio
 import logging
 import json
 import html
@@ -324,56 +323,42 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ==================== MAIN APPLICATION ====================
 
-async def run_bot() -> None:
-    """Run the bot asynchronously."""
-    # Create the Application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("number", number_command))
-    
-    # Add message handler for all other messages (silent ignore)
-    application.add_handler(
-        MessageHandler(filters.ALL & ~filters.COMMAND, handle_other_messages)
-    )
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    # Log startup information
-    logger.info("=" * 60)
-    logger.info("TraceX Free Bot v2.0.1 is starting...")
-    logger.info(f"Bot username: @{BOT_USERNAME}")
-    logger.info(f"API URL: {API_URL}")
-    logger.info("=" * 60)
-    logger.info("✅ Features:")
-    logger.info("   • JSON Markdown Formatting with ```json code blocks")
-    logger.info("   • Clean JSON output for better Telegram display")
-    logger.info("   • Removed developer branding from responses")
-    logger.info("   • /start command with welcome message")
-    logger.info("   • Fixed for Python 3.14+ compatibility")
-    logger.info("   • Optimized for Render deployment")
-    logger.info("=" * 60)
-    
-    # Start the bot
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
 def main() -> None:
     """Main function to start the bot."""
     try:
-        # For Python 3.14+, we need to handle event loops differently
-        try:
-            # Try to get or create event loop
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Create the Application - this handles event loop internally
+        application = Application.builder().token(BOT_TOKEN).build()
         
-        # Run the bot
-        loop.run_until_complete(run_bot())
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("number", number_command))
+        
+        # Add message handler for all other messages (silent ignore)
+        application.add_handler(
+            MessageHandler(filters.ALL & ~filters.COMMAND, handle_other_messages)
+        )
+        
+        # Add error handler
+        application.add_error_handler(error_handler)
+        
+        # Log startup information
+        logger.info("=" * 60)
+        logger.info("TraceX Free Bot v2.0.2 is starting...")
+        logger.info(f"Bot username: @{BOT_USERNAME}")
+        logger.info(f"API URL: {API_URL}")
+        logger.info("=" * 60)
+        logger.info("✅ Features:")
+        logger.info("   • JSON Markdown Formatting with ```json code blocks")
+        logger.info("   • Clean JSON output for better Telegram display")
+        logger.info("   • Removed developer branding from responses")
+        logger.info("   • /start command with welcome message")
+        logger.info("   • Simple and stable for Render deployment")
+        logger.info("=" * 60)
+        logger.info("🚀 Bot is running and ready to handle requests!")
+        logger.info("=" * 60)
+        
+        # Start the bot - application.run_polling handles the event loop internally
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
